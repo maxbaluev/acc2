@@ -1218,8 +1218,19 @@ export const recordApplyOutcome = async (opts: {
   // DECLARE a target AND claim a commit are held to commit-existence.
   if (status === "applied" && opts.commitSha) {
     const verdict = classifyApply(payload, opts.commitSha, process.cwd());
-    if (verdict === "missing") {
-      console.error(`acc apply --record: refusing status=applied — commit ${opts.commitSha} either does not exist or does not touch the proposed target.`);
+    // Accept status=applied when the commit GENUINELY changed at least one
+    // declared target file ("verified") — the literal anchored before/after
+    // substring is NOT required, because the prescribed SEMANTIC APPLY PATH
+    // applies the amendment's INTENT, not its byte-for-byte diff. Requiring the
+    // literal anchor here was a k_252 defect: a hard text gate where
+    // residual + file-touch should decide, which prevented the k_555 four-link
+    // credit chain (create→retrieve→mutate→credit) from EVER closing for an
+    // amendment applied the prescribed way. We refuse only when the commit does
+    // not exist, declares no resolvable target, or touches NONE of the declared
+    // target files ("missing"/"drift") — preserving the guard that a
+    // bogus/unrelated commit cannot fabricate a credit chain.
+    if (verdict === "missing" || verdict === "drift") {
+      console.error(`acc apply --record: refusing status=applied — commit ${opts.commitSha} either does not exist or does not touch any declared target file.`);
       console.error(`  correct the commit + retry, or use --status failed.`);
       return { ok: false, reason: `apply_diff_mismatch:${verdict}`, exitCode: 3 };
     }

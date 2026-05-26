@@ -148,6 +148,34 @@ describe("runVerify", () => {
     expect(text).toContain("drift:    0");
   });
 
+  test("multi-target: commit touches a SECONDARY declared target (not the first-resolved one) → verified=1, exit 0", async () => {
+    // A semantic apply may change any ONE of the declared targets — the first
+    // top-level target may be a sibling the commit did not touch while the
+    // proposed_behavior target IS the file that changed. classifyApply verifies
+    // when the commit touches AT LEAST ONE declared target, so the credit chain
+    // closes (k_555). The old single-first-resolved-target check returned drift.
+    const target = "second.txt";
+    const parts = initRepoWithCommit(target, "SECONDARY_CHANGED");
+    repoRoot = parts.split("::")[0]!;
+    const sha = parts.split("::")[1]!;
+    const db = openDb(process.env.ACC2_DB_PATH!);
+    seedDirectiveOpened(db);
+    seedProposal(db, "evt_prop_multi", {
+      // first-resolved top-level target the commit did NOT touch
+      target_resource: "repo:first_NOT_touched.txt",
+      current_behavior: "old",
+      // proposed_behavior declares the SECONDARY target the commit DID touch
+      proposed_behavior: { target_resource: `repo:${target}`, proposed_behavior: "new" },
+      diff: { kind: "anchored_replace_v1", before: "ANCHOR_ABSENT", after: "ALSO_ABSENT" },
+    });
+    seedApply(db, "evt_app_multi", "evt_prop_multi", { status: "applied", commit_sha: sha });
+    const c = cap(); const code = await runVerify([DIRECTIVE_ID, "--repo", repoRoot]); c.restore();
+    expect(code).toBe(0);
+    const text = c.out.join("");
+    expect(text).toContain("verified: 1");
+    expect(text).toContain("drift:    0");
+  });
+
   test("applied with commit_sha NOT in git → missing=1, exit 2", async () => {
     repoRoot = mkdtempSync(join(tmpdir(), "acc2-verify-empty-"));
     spawnSync("git", ["init", "-q"], { cwd: repoRoot });
