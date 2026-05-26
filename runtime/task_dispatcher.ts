@@ -1341,6 +1341,9 @@ export const dispatchReadyTask = async (
             dispatch_id: dispatchId,
             action_error: actionObs.error ?? "unknown",
             stderr_tail: actionObs.stderrTail,
+            runtimeUnavailable: (actionObs as { runtimeUnavailable?: Record<string, unknown> }).runtimeUnavailable ?? null,
+            breakdown: { runtime_unavailable: (actionObs as { runtimeUnavailable?: Record<string, unknown> }).runtimeUnavailable ? 1 : 0 },
+            reliability_profile: (actionObs as { runtimeUnavailable?: Record<string, unknown> }).runtimeUnavailable ? { runtime_unavailable: (actionObs as { runtimeUnavailable?: Record<string, unknown> }).runtimeUnavailable } : null,
             dispatch_decision: dispatchDecisionEvidence,
             routing_axes: decision.routing_axes,
             route_scores: decision.route_scores,
@@ -1417,6 +1420,7 @@ export const dispatchReadyTask = async (
           payload: {
             dispatch_id: dispatchId,
             action_result: actionObs.result ?? null,
+            runtimeUnavailable: (actionObs as { runtimeUnavailable?: Record<string, unknown> }).runtimeUnavailable ?? null,
             verifier_result: verifierObs.result ?? null,
             outcome_dimensions: verifierObs.result && typeof verifierObs.result === "object" && !Array.isArray(verifierObs.result)
               ? ((verifierObs.result as Record<string, unknown>).outcome_dimensions ?? (verifierObs.result as Record<string, unknown>).breakdown ?? null)

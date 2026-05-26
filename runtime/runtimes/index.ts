@@ -41,6 +41,14 @@ export type UnifiedRuntimeInvocation = {
 // strongly-typed variants, and registry-resolved runners return a
 // structurally identical envelope (ok/result/error/durationMs/etc).
 // Callers consume the shared fields uniformly.
+export type RuntimeUnavailableEvidence = {
+  runtime: string;
+  missing_binary: string | null;
+  install_hint: string | null;
+  suggested_actions: string[];
+  brain_actionable: boolean;
+};
+
 export type RegistryRunnerObservation = {
   ok: boolean;
   result?: JsonValue;
@@ -50,6 +58,7 @@ export type RegistryRunnerObservation = {
   stderrTail: string;
   sandboxWarnings: string[];
   irreversibleEffects: Array<{ kind: string; description: string }>;
+  runtimeUnavailable?: RuntimeUnavailableEvidence;
 };
 
 export type UnifiedRuntimeObservation =
@@ -181,6 +190,15 @@ const unavailableObservation = (
     stderrTail: "",
     sandboxWarnings: warnings,
     irreversibleEffects: [],
+    runtimeUnavailable: {
+      runtime,
+      missing_binary: availability.missing_binary ?? null,
+      install_hint: availability.install_hint ?? null,
+      suggested_actions: availability.install_hint
+        ? ["provision_runtime", "retry_after_provision", "select_alternate_runtime"]
+        : ["select_alternate_runtime"],
+      brain_actionable: true,
+    },
   };
 };
 

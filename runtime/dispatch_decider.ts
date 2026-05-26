@@ -49,6 +49,15 @@ export const INLINE_PATTERN_CONFIDENCE_THRESHOLD = 0.6;
 
 export type DispatchRouteScores = Record<string, number>;
 
+export type RuntimeSelectionEvidence = {
+  candidate_scores: Record<string, number>;
+  selected_runtime: string | null;
+  predicted_residual_by_runtime: Record<string, number>;
+  availability_by_runtime: Record<string, unknown>;
+  cited_artifact_ids: string[];
+  scorer_artifact_ids: string[];
+};
+
 export type DispatchDecisionEvidence = {
   /** Open-ended axis vector used to score the route choice. These keys are
    *  learned/reweighted from verifier and knowledge outcomes; consumers must
@@ -56,6 +65,9 @@ export type DispatchDecisionEvidence = {
   routing_axes: Record<string, number>;
   route_scores: DispatchRouteScores;
   verifier_evidence: Record<string, number>;
+  /** Residual-scored runtime fit evidence. This is surfaced in dispatch_decided
+   *  and credited from downstream outcomes; it must not hard-prune lanes. */
+  runtime_selection?: RuntimeSelectionEvidence;
   /** ACTIVE ranking of dispatch_strategy_v1 artifacts (amendment
    *  A12ET3SF, originally 48SN4XF3WN4KBBCHHCANDRDQRW). Populated by
    *  dispatch_strategy_ranker. NO LONGER observational: a non-empty ranking
@@ -445,6 +457,64 @@ const applyPeerAccuracyRouteAdjustment = (
   return { route_scores: adjusted, verifier_evidence: evidence };
 };
 
+const readRuntimeAvailabilityEvidence = (db: Database): Record<string, unknown> => {
+  const out: Record<string, unknown> = {};
+  try {
+    const rows = db.query(`SELECT payload FROM events WHERE kind = 'runtime_self_diagnostic_recorded' ORDER BY ts DESC, rowid DESC LIMIT 50`).all() as Array<{ payload: string }>;
+    for (const row of rows) {
+      const p = safeJson(row.payload);
+      const runtime = typeof p.runtime === "string" ? p.runtime : null;
+      if (runtime && out[runtime] === undefined) out[runtime] = p;
+    }
+  } catch { /* cold start */ }
+  return out;
+};
+
+const readRuntimeArtifactEvidence = (db: Database): { scores: Record<string, number>; cited: string[] } => {
+  const totals: Record<string, { weighted: number; weight: number }> = {};
+  const cited: string[] = [];
+  try {
+    const rows = db.query(`SELECT id, runtime, score, confidence FROM act_artifact WHERE runtime IS NOT NULL AND status IN ('admitted','promoted') ORDER BY updated_at DESC LIMIT 100`).all() as Array<{ id: string; runtime: string | null; score: number | null; confidence: number | null }>;
+    for (const row of rows) {
+      if (!row.runtime) continue;
+      const weight = Math.max(0.05, clamp01(row.confidence ?? 0.3));
+      const prev = totals[row.runtime] ?? { weighted: 0, weight: 0 };
+      totals[row.runtime] = { weighted: prev.weighted + clamp01(row.score ?? 0.5) * weight, weight: prev.weight + weight };
+      if (cited.length < 8) cited.push(row.id);
+    }
+  } catch { /* cold start */ }
+  const scores: Record<string, number> = {};
+  for (const [runtime, v] of Object.entries(totals)) scores[runtime] = v.weight > 0 ? clamp01(v.weighted / v.weight) : 0.5;
+  return { scores, cited };
+};
+
+const buildRuntimeSelectionEvidence = (db: Database, task: TaskNode, targets: string[]): RuntimeSelectionEvidence => {
+  const runtimes = new Set(["bun", "uv", "camofox-browser"]);
+  const availability = readRuntimeAvailabilityEvidence(db);
+  const artifacts = readRuntimeArtifactEvidence(db);
+  for (const runtime of Object.keys(availability)) runtimes.add(runtime);
+  for (const runtime of Object.keys(artifacts.scores)) runtimes.add(runtime);
+  const structural: Record<string, number> = {};
+  for (const runtime of runtimes) structural[runtime] = 0.34;
+  for (const ref of targets) {
+    if (ref.startsWith("runtime:bun:")) structural.bun = Math.max(structural.bun ?? 0, 0.95);
+    if (ref.startsWith("runtime:python:") || ref.startsWith("runtime:uv:")) structural.uv = Math.max(structural.uv ?? 0, 0.95);
+    if (ref.startsWith("runtime:browser:") || ref.startsWith("browser_session:")) structural["camofox-browser"] = Math.max(structural["camofox-browser"] ?? 0, 0.95);
+  }
+  const candidate_scores: Record<string, number> = {};
+  for (const runtime of runtimes) {
+    const diag = availability[runtime] as Record<string, unknown> | undefined;
+    const unavailablePenalty = diag?.fault_kind === "runtime_unavailable" ? 0.35 : 0;
+    candidate_scores[runtime] = clamp01((structural[runtime] ?? 0.34) * 0.55 + (artifacts.scores[runtime] ?? 0.5) * 0.45 - unavailablePenalty);
+  }
+  let selected_runtime: string | null = null;
+  let best = -1;
+  for (const [runtime, score] of Object.entries(candidate_scores)) if (score > best) { selected_runtime = runtime; best = score; }
+  const predicted_residual_by_runtime: Record<string, number> = {};
+  for (const [runtime, score] of Object.entries(candidate_scores)) predicted_residual_by_runtime[runtime] = clamp01(1 - score);
+  return { candidate_scores, selected_runtime, predicted_residual_by_runtime, availability_by_runtime: availability, cited_artifact_ids: artifacts.cited, scorer_artifact_ids: ["runtime_selector_v1"] };
+};
+
 const evidenceForSelectedRoute = (
   evidence: DispatchDecisionEvidence,
   selectedRoute: DispatchRoute,
@@ -474,6 +544,7 @@ export const dispatchEvidencePayload = (decision: DispatchDecision): {
   routing_axes: Record<string, number>;
   route_scores: DispatchRouteScores;
   verifier_evidence: Record<string, number>;
+  runtime_selection?: RuntimeSelectionEvidence;
   strategy_ranks: RankedStrategy[];
   strategy_shadow_ranks: RankedStrategy[];
 } => {
@@ -488,6 +559,7 @@ export const dispatchEvidencePayload = (decision: DispatchDecision): {
     routing_axes: decision.routing_axes,
     route_scores: decision.route_scores,
     verifier_evidence: decision.verifier_evidence,
+    runtime_selection: decision.runtime_selection,
     strategy_ranks: ranks,
     strategy_shadow_ranks: ranks,
   };
@@ -536,6 +608,7 @@ const buildDispatchDecisionEvidence = (db: Database, task: TaskNode): DispatchDe
   return {
     routing_axes,
     route_scores: scoreRoutesFromAxes(routing_axes),
+    runtime_selection: buildRuntimeSelectionEvidence(db, task, text, targets),
     verifier_evidence: {
       ...learned.verifier_evidence,
       target_count: targets.length,

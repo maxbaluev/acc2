@@ -78,6 +78,13 @@ export type RecipeTrajectoryStep = {
   predicted_residual?: number | null;
 };
 
+export type RecipeRuntimeSignature = {
+  runtimes: string[];
+  step_runtimes: string[];
+  selected_runtime?: string | null;
+  runtime_fit_score?: number;
+};
+
 export type RecipeMatch = {
   /** The knowledge_candidate / knowledge_promoted event id carrying recipe_shape. */
   recipe_id: string;
@@ -90,6 +97,7 @@ export type RecipeMatch = {
   topology_signature: string;
   confidence: number;
   trajectory: RecipeTrajectoryStep[];
+  runtime_signature: RecipeRuntimeSignature;
   /** Cited act_artifact handles harvested from the trajectory steps; surfaces
    *  for credit attribution and substrate retrieval. */
   cited_act_artifact_ids: string[];
@@ -144,6 +152,16 @@ const taskTopologySignature = (db: Database, task: TaskNode): string => {
   return foldTopologySignature(rows);
 };
 
+const runtimeSignatureFromRecipePayload = (payload: Record<string, unknown>, trajectory: RecipeTrajectoryStep[]): RecipeRuntimeSignature => {
+  const recipeShape = payload.recipe_shape && typeof payload.recipe_shape === "object" && !Array.isArray(payload.recipe_shape) ? payload.recipe_shape as Record<string, unknown> : {};
+  const existing = recipeShape.runtime_signature && typeof recipeShape.runtime_signature === "object" && !Array.isArray(recipeShape.runtime_signature) ? recipeShape.runtime_signature as Record<string, unknown> : {};
+  const step_runtimes = trajectory.map((s) => typeof s.runtime === "string" ? s.runtime : null).filter((s): s is string => !!s);
+  const declared = Array.isArray(existing.runtimes) ? existing.runtimes.filter((s): s is string => typeof s === "string") : [];
+  const selected_runtime = typeof existing.selected_runtime === "string" ? existing.selected_runtime : null;
+  const runtime_fit_score = typeof existing.runtime_fit_score === "number" ? existing.runtime_fit_score : undefined;
+  return { runtimes: Array.from(new Set([...declared, ...step_runtimes, ...(selected_runtime ? [selected_runtime] : [])])), step_runtimes, selected_runtime, ...(runtime_fit_score !== undefined ? { runtime_fit_score } : {}) };
+};
+
 /** Filter / shape one recipes_latest_view row into a RecipeMatch when it
  *  passes goal_shape + topology + confidence gating. */
 const tryMatchCandidate = (
@@ -153,6 +171,7 @@ const tryMatchCandidate = (
     topology_signature: string;
     confidence: number;
     trajectory: RecipeTrajectoryStep[];
+    runtime_signature: RecipeRuntimeSignature;
   },
   taskGoalShape: string,
   taskGoalLower: string,
@@ -199,10 +218,18 @@ const tryMatchCandidate = (
   if (candidate.confidence < RECIPE_AUTO_ARCHIVE_FLOOR) return null;
 
   const cited: string[] = [];
+  const stepRuntimes: string[] = [];
   for (const step of candidate.trajectory) {
     if (step.artifact_id) cited.push(step.artifact_id);
     if (step.verifier_artifact_id) cited.push(step.verifier_artifact_id);
+    if (step.runtime) stepRuntimes.push(step.runtime);
   }
+  const runtimeSignature = candidate.runtime_signature ?? {
+    runtimes: Array.from(new Set(stepRuntimes)),
+    step_runtimes: stepRuntimes,
+    selected_runtime: stepRuntimes[0] ?? null,
+    runtime_fit_score: stepRuntimes.length > 0 ? 1 : 0.5,
+  };
   return {
     recipe_id: candidate.id,
     recipe_knowledge_event_id: candidate.id,
@@ -211,6 +238,7 @@ const tryMatchCandidate = (
     topology_signature: candidate.topology_signature,
     confidence: candidate.confidence,
     trajectory: candidate.trajectory,
+    runtime_signature: candidate.runtime_signature,
     cited_act_artifact_ids: Array.from(new Set(cited)),
   };
 };
@@ -262,6 +290,7 @@ const pickBestRecipeMatch = (
         topology_signature: r.topology_signature,
         confidence: r.confidence,
         trajectory,
+        runtime_signature: runtimeSignatureFromRecipePayload(p, trajectory),
       },
       taskGoalShape,
       taskGoalLower,
@@ -344,7 +373,7 @@ export type RecipeArtifactRunner = (
   db: Database,
   artifactId: string,
   inputs: JsonValue,
-) => Promise<{ ok: boolean; result: JsonValue | null; error?: string }>;
+) => Promise<{ ok: boolean; result: JsonValue | null; error?: string; runtimeUnavailable?: Record<string, JsonValue> }>;
 
 const runArtifactByRuntime: RecipeArtifactRunner = async (
   db,
@@ -387,6 +416,7 @@ const runArtifactByRuntime: RecipeArtifactRunner = async (
     ok: boolean;
     result?: JsonValue;
     error?: string;
+    runtimeUnavailable?: Record<string, JsonValue>;
   };
   // Capability-aware runtime resolution is centralized in
   // runArtifactForRuntime (runtime/runtimes/index.ts resolveRuntime):
@@ -402,11 +432,12 @@ const runArtifactByRuntime: RecipeArtifactRunner = async (
     inputs,
     db,
   });
-  observation = { ok: obs.ok, result: obs.result ?? null, error: obs.error };
+  observation = { ok: obs.ok, result: obs.result ?? null, error: obs.error, runtimeUnavailable: (obs as { runtimeUnavailable?: Record<string, JsonValue> }).runtimeUnavailable };
   return {
     ok: observation.ok,
     result: observation.result ?? null,
     error: observation.error,
+    runtimeUnavailable: observation.runtimeUnavailable,
   };
 };
 
@@ -551,13 +582,16 @@ export const replayRecipe = async (
           recipe_replayed: true,
           replay_aborted: true,
           recipe_id: match.recipe_id,
+          runtime_signature: match.runtime_signature,
           knowledge_id: match.recipe_id,
           reusable_trajectory_knowledge_id: match.recipe_id,
           step_index: stepIdx,
           step_count: actionSteps.length,
           reason: `action_runtime_failed:${actionObs.error ?? "unknown"}`,
           abort_reason: `action_runtime_failed:${actionObs.error ?? "unknown"}`,
-          breakdown: { replay_abort: 1, runtime_error: 1 },
+          runtimeUnavailable: actionObs.runtimeUnavailable ?? null,
+          reliability_profile: actionObs.runtimeUnavailable ? { runtime_unavailable: 1, brain_actionable_degrade: 1 } : undefined,
+          breakdown: { replay_abort: 1, runtime_error: 1, runtime_unavailable: actionObs.runtimeUnavailable ? 1 : 0 },
         } as JsonValue,
         context_refs: [match.recipe_id],
       });
@@ -677,6 +711,7 @@ export const replayRecipe = async (
           recipe_replayed: true,
           replay_aborted: true,
           recipe_id: match.recipe_id,
+          runtime_signature: match.runtime_signature,
           knowledge_id: match.recipe_id,
           reusable_trajectory_knowledge_id: match.recipe_id,
           step_index: stepIdx,
