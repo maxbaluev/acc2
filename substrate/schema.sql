@@ -95,6 +95,19 @@ CREATE INDEX IF NOT EXISTS idx_events_origin_ts
 CREATE INDEX IF NOT EXISTS idx_events_directive_ts
   ON events(directive_id, ts);
 
+-- DAEMON STABILITY HARDENING (fix #1): symmetric (task_id, ts) index. Several
+-- per-dispatch hot paths filter on task_id and order by ts WITHOUT a kind
+-- filter — e.g. dispatch_continuation.ts (`SELECT directive_id … WHERE
+-- task_id = ? ORDER BY ts ASC LIMIT 1`) and task_dispatcher.ts (`… WHERE
+-- ts >= ? AND task_id = ? ORDER BY ts ASC`). idx_events_task_kind_ts puts
+-- `kind` BETWEEN task_id and ts, so the planner satisfies task_id=? via that
+-- index but then USES TEMP B-TREE FOR ORDER BY (confirmed by EXPLAIN) — on a
+-- 424k-row ledger a task with many rows pays a full sort per call. This is the
+-- exact mirror of the directive_id fix above; (task_id, ts) serves both the
+-- equality filter and the ts sort directly, eliminating the temp b-tree.
+CREATE INDEX IF NOT EXISTS idx_events_task_ts
+  ON events(task_id, ts);
+
 -- prompt_composer.readRecentFailures runs on EVERY dispatch:
 -- `SELECT failure_kind, ts FROM events WHERE failure_kind IS NOT NULL ORDER BY ts DESC LIMIT 3`.
 -- Pre-fix: SCAN events USING INDEX idx_events_ts (walk ts index backwards,
