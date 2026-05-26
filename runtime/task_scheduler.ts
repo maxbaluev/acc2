@@ -1987,10 +1987,19 @@ export const schedulerLoop = async (
     // instead of pollIntervalMs (default 500ms). When activation fires,
     // the returned promise resolves with the payload; we ignore it and
     // just loop — the next tick will see the row in ready_tasks_view.
-    await Promise.race([
-      new Promise((r) => setTimeout(r, pollIntervalMs)),
-      waitForActivation(WAKE_KINDS, opts.abort),
-    ]);
+    const activationAbort = new AbortController();
+    const forwardAbort = (): void => activationAbort.abort();
+    if (opts.abort?.aborted) activationAbort.abort();
+    else opts.abort?.addEventListener("abort", forwardAbort, { once: true });
+    try {
+      await Promise.race([
+        new Promise((r) => setTimeout(r, pollIntervalMs)),
+        waitForActivation(WAKE_KINDS, activationAbort.signal),
+      ]);
+    } finally {
+      opts.abort?.removeEventListener("abort", forwardAbort);
+      activationAbort.abort();
+    }
   }
   } finally {
     for (const dispose of clearDisposers) dispose();

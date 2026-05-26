@@ -25,6 +25,7 @@ import { reconcileBrainDispatchesAtBoot, setBootSessionToken } from "./brain_dis
 import { newId } from "./ids";
 import { __resetHandshakePermitsForTest } from "./bridge/opencode";
 import { runTelemetryEvictionSweep } from "./archival_worker";
+import { activationListenerCount, clearAllActivationListeners } from "./activation_bus";
 
 afterAll(() => closeDb());
 beforeEach(() => {
@@ -595,6 +596,39 @@ describe("task_scheduler", () => {
       expect(true).toBe(true);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("leak guard: schedulerLoop disposes activation race-loser listeners every poll iteration (timeout-won path)", async () => {
+    // Resource-leak regression. The inter-tick race is
+    //   Promise.race([setTimeout(pollIntervalMs), waitForActivation(WAKE_KINDS, ...)]).
+    // When the setTimeout WINS (the common case — no WAKE_KIND event fires
+    // during the wait), the waitForActivation promise stays pending. Its
+    // per-kind listeners must be disposed every iteration regardless of who
+    // wins the race, otherwise ~one listener per WAKE_KIND leaks every
+    // pollIntervalMs and only clears when a WAKE_KIND event finally fires.
+    // We force the timeout-won path by NOT publishing any WAKE_KIND event,
+    // run multiple poll iterations, and assert the listener count returns to
+    // its pre-loop baseline — i.e. listeners do NOT accumulate across ticks.
+    clearAllActivationListeners();
+    const db = openDb(":memory:");
+    try {
+      const baseline = activationListenerCount();
+      // stopAfterTicks forces several real inter-tick awaits (each one runs
+      // the activation/poll race) on an empty substrate where the timeout
+      // always wins — no directive_opened/task_* event is ever published.
+      await schedulerLoop(db, {
+        maxConcurrent: 5,
+        pollIntervalMs: 5,
+        stopAfterTicks: 8,
+      });
+      // If the race-loser's listeners leaked, count would be baseline + (a
+      // few WAKE_KINDS per iteration). With per-iteration disposal it returns
+      // to baseline.
+      expect(activationListenerCount()).toBe(baseline);
+    } finally {
+      clearAllActivationListeners();
+      closeDb();
     }
   }, 30_000);
 
