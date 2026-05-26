@@ -656,6 +656,12 @@ export const EVENT_KINDS = {
   restart_drain_started:                   { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   restart_drain_completed:                 { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: true },
   restart_drain_timed_out:                 { producer: "runtime",   embeddable: false, mirror_inline: true,  health_metric: true,  narrative: true },
+  // Forced termination of a wedged brain subprocess after the drain budget
+  // expired (DAEMON STABILITY HARDENING fix #5). Evidence that stop() never
+  // hangs on a stuck child — one row per force-killed PID. mirror_inline so
+  // the operator sees forced kills surfaced; health_metric so a spike is
+  // visible as a restart-wedge symptom.
+  brain_subprocess_force_terminated:       { producer: "runtime",   embeddable: false, mirror_inline: true,  health_metric: true,  narrative: true },
   daemon_index_rebuilt:                    { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   daemon_ready:                            { producer: "runtime",   embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   daemon_unhandled_rejection:              { producer: "runtime",   embeddable: false, mirror_inline: true,  health_metric: true,  narrative: true  },
