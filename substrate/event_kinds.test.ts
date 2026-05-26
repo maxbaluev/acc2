@@ -469,6 +469,10 @@ describe("derived sets match their pre-unification shape", () => {
       // dispatches finished — operator must see this to know dispatches
       // were force-killed and may have orphaned.
       "restart_drain_timed_out",
+      // DAEMON STABILITY HARDENING (fix #5): a wedged brain subprocess was
+      // force-terminated after the drain budget expired. Health-metric so a
+      // spike of forced kills surfaces as a restart-wedge symptom.
+      "brain_subprocess_force_terminated",
       // Hot-reload deep-improvement (2026-05-17): rejected = validation
       // refused the new module shape (missing expected_exports / smoke
       // probe failed). Operator sees recurrent rejections as a substrate
@@ -715,6 +719,9 @@ describe("derived sets match their pre-unification shape", () => {
       // Restart drain timeout (2026-05-16, YEF00QZM amendment 8EAKQCJW):
       // operator must see when forced kill happened post-drain budget.
       "restart_drain_timed_out",
+      // DAEMON STABILITY HARDENING (fix #5): operator must see inline which
+      // wedged brain PIDs were force-terminated after the drain budget.
+      "brain_subprocess_force_terminated",
       // F3 (2026-05-18): owner-required closure terminators must surface
       // inline so the owner sees the expired ask in chat without
       // opening logs.

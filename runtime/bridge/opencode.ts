@@ -221,18 +221,68 @@ const stderrIndicatesAuthFailure = (stderr: string): boolean => {
   return AUTH_STDERR_MARKERS.some((m) => lower.includes(m));
 };
 
-/** Kill every live opencode subprocess. SIGTERM first; SIGKILL after 1.5s
- *  per process. Called from daemon.stop() so children never outlive the
- *  parent. Returns the number of procs that were signalled. */
-export const killAllLiveOpencodeProcs = (): number => {
+/** Force-kill outcome for one subprocess: which signal we sent and whether
+ *  the underlying handle accepted it. Returned to daemon.stop() so it can
+ *  emit a substrate evidence event proving the forced termination happened
+ *  (DAEMON STABILITY HARDENING, fix #5 — a wedged drain MUST leave a ledger
+ *  trail of exactly which orphaned brain PIDs were force-terminated). */
+export type ForcedProcKill = { pid: number; sigterm_ok: boolean };
+
+/** Kill every live opencode subprocess. SIGTERM first; an UNCONDITIONAL
+ *  SIGKILL escalation follows after SIGKILL_ESCALATION_MS per process so a
+ *  brain that ignores SIGTERM (wedged mid-cycle) cannot survive the daemon.
+ *
+ *  Called from daemon.stop() AFTER the bounded drain budget expires — at
+ *  that point any still-live proc is a wedged dispatch the drain could not
+ *  finish, and leaving it running would (a) keep file handles / the MCP
+ *  session against a now-dead daemon URL alive and (b) re-fail the next
+ *  boot's handshake. Returns the per-proc kill records (pid + whether the
+ *  SIGTERM handle accepted) so the caller can write forced-termination
+ *  evidence; an empty array means a clean shutdown with nothing to kill.
+ *
+ *  The SIGKILL escalation timer is NOT `.unref()`'d: on a real daemon stop
+ *  the process must stay alive long enough to deliver SIGKILL to a wedged
+ *  child, otherwise the parent could exit first and re-parent the orphan to
+ *  init still running. The timer self-clears well within any drain budget. */
+export const SIGKILL_ESCALATION_MS = (() => {
+  const raw = process.env.ACC2_BRAIN_SIGKILL_ESCALATION_MS;
+  if (typeof raw === "string" && raw.length > 0) {
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 0 && n <= 30_000) return n;
+  }
+  return 1_500;
+})();
+
+export const killAllLiveOpencodeProcs = (): ForcedProcKill[] => {
   const snapshot = Array.from(LIVE_OPENCODE_PROCS);
+  const killed: ForcedProcKill[] = [];
   for (const p of snapshot) {
-    try { p.kill("SIGTERM"); } catch { /* swallow */ }
-    setTimeout(() => { try { p.kill("SIGKILL"); } catch { /* swallow */ } }, 1_500).unref();
+    let sigtermOk = false;
+    try { sigtermOk = p.kill("SIGTERM"); } catch { /* swallow */ }
+    // Unconditional SIGKILL escalation — a wedged brain ignores SIGTERM.
+    // Not unref'd: see the doc comment above (the parent must outlive the
+    // delivery window so the orphan is killed, not re-parented to init).
+    setTimeout(() => { try { p.kill("SIGKILL"); } catch { /* swallow */ } }, SIGKILL_ESCALATION_MS);
+    killed.push({ pid: p.pid, sigterm_ok: sigtermOk });
   }
   LIVE_OPENCODE_PROCS.clear();
-  return snapshot.length;
+  return killed;
 };
+
+/** TEST-ONLY: register a fake live proc so the daemon force-clear path can
+ *  be exercised without spawning a real opencode subprocess. Returns a
+ *  handle whose `signals` array records every signal the kill path sent, so
+ *  a test can assert SIGTERM (and the escalated SIGKILL) were delivered.
+ *  Never used in production code — guarded by the `_` test-export prefix. */
+export const _registerFakeLiveProcForTests = (pid: number): { pid: number; signals: NodeJS.Signals[] } => {
+  const signals: NodeJS.Signals[] = [];
+  const entry: LiveProc = { pid, kill: (sig) => { signals.push(sig); return true; } };
+  LIVE_OPENCODE_PROCS.add(entry);
+  return { pid, signals };
+};
+
+/** TEST-ONLY: how many live procs are currently registered. */
+export const _liveOpencodeProcCountForTests = (): number => LIVE_OPENCODE_PROCS.size;
 
 // ── Handshake serialization gate (2026-05-21, multi-brain foundation fix) ──
 // Foundational reason for the mcp_handshake_timed_out cascade observed on

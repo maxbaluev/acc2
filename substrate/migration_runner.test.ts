@@ -55,6 +55,30 @@ describe("migration_runner", () => {
     expect(second.failed).toBe(0);
   });
 
+  test("v004 task-ts index migration is idempotent and removes the ORDER BY temp b-tree for task_id-scoped ts queries (fix #1)", () => {
+    const db = openDb(":memory:");
+    const first = runVersionedMigrations(db);
+    expect(first.failed).toBe(0);
+    expect(first.versions_applied).toContain("v004");
+    // The symmetric (task_id, ts) index exists.
+    const idx = (db.query<{ name: string }, []>(`SELECT name FROM sqlite_master WHERE type='index' AND name = 'idx_events_task_ts'`).all() ?? []).map((r) => r.name);
+    expect(idx).toEqual(["idx_events_task_ts"]);
+    // The hot per-dispatch query (task_id filter + ts ORDER BY, no kind) now
+    // plans through idx_events_task_ts and NO LONGER uses a temp b-tree —
+    // the unbounded-ledger sort the index was added to kill.
+    const plan = (db
+      .query<{ detail: string }, []>(
+        `EXPLAIN QUERY PLAN SELECT directive_id FROM events WHERE task_id = 'x' ORDER BY ts ASC LIMIT 1`,
+      )
+      .all() ?? []).map((r) => r.detail).join(" | ");
+    expect(plan).toContain("idx_events_task_ts");
+    expect(plan.toUpperCase()).not.toContain("TEMP B-TREE");
+    // Idempotent re-run applies nothing.
+    const second = runVersionedMigrations(db);
+    expect(second.applied).toBe(0);
+    expect(second.failed).toBe(0);
+  });
+
   test("crash-window atomicity: the schema_migration_applied marker is committed in the SAME transaction as the migration SQL (every applied version has exactly one durable marker, no partial-apply re-run risk)", () => {
     // The marker event is the SOLE idempotency signal. If it lands in a
     // separate write after COMMIT, a crash between COMMIT and the emit leaves
