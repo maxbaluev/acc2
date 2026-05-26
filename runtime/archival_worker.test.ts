@@ -14,6 +14,7 @@ import {
   runTelemetryEvictionSweep,
   retainedEvictedCount,
   curationModeForKind,
+  evaluateLedgerCurationPressure,
   _listArchivesForDir,
 } from "./archival_worker";
 import { listArchives, openColdDb, searchAcrossArchives } from "../substrate/cold_db";
@@ -582,5 +583,134 @@ describe("runArchivalSweep — heavy READ scan routes through SQL worker pool", 
     const summary = await runArchivalSweep(db, { stateDbPath: dbPath, nowMs: NOW, retentionDays: 30 });
     expect(summary.scanned).toBe(10);
     expect(summary.deleted).toBe(10);
+  });
+});
+
+// ── Pressure-triggered bounded-ledger curation (amendment
+// CS4WFHZM7H4TN425GRSW39ZVMG) ─────────────────────────────────────────
+describe("evaluateLedgerCurationPressure — pressure-triggered retention", () => {
+  let tmpDir: string;
+  let dbPath: string;
+  let db: Database;
+  const NOW = Date.parse("2026-05-26T12:00:00.000Z");
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "acc2-pressure-"));
+    dbPath = join(tmpDir, "state.db");
+    db = openDb(dbPath);
+    clearSqlPool();
+  });
+  afterEach(() => {
+    closeDb(dbPath);
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("no pressure → default 30-day window; row-count above hard cap → floor", () => {
+    // Tiny caps so a handful of rows crosses the hard cap deterministically.
+    const low = evaluateLedgerCurationPressure(
+      db,
+      { stateDbPath: dbPath, rowCountSoftCap: 1_000_000, rowCountHardCap: 2_000_000, dbSizeSoftCapBytes: 1e12, dbSizeHardCapBytes: 2e12, minRetentionDays: 2 },
+      NOW,
+    );
+    expect(low.pressure).toBe(0);
+    expect(low.hot_retention_days).toBe(30);
+    expect(low.pressure_source).toBe("none");
+
+    // Seed a few rows so the real row count exceeds the tiny hard cap, then
+    // assert the policy compresses to the floor under max pressure.
+    for (let i = 0; i < 5; i++) seedEventAtTs(db, new Date(NOW - 1000 * i).toISOString(), i);
+    const high = evaluateLedgerCurationPressure(
+      db,
+      { stateDbPath: dbPath, rowCountSoftCap: 0, rowCountHardCap: 1, dbSizeSoftCapBytes: 1e12, dbSizeHardCapBytes: 2e12, minRetentionDays: 2 },
+      NOW,
+    );
+    expect(high.pressure).toBe(1);
+    expect(high.pressure_source).toBe("row_count");
+    expect(high.hot_retention_days).toBe(2);
+  });
+
+  test("PROOF: archival fires on rows YOUNGER than 30d when row-count pressure is high", async () => {
+    // Seed 40 events all dated 5 days ago — well WITHIN the default 30-day
+    // window, so age-only archival would archive NONE of them.
+    for (let i = 0; i < 40; i++) {
+      const ts = new Date(NOW - 5 * 24 * 60 * 60 * 1000 + i * 1000).toISOString();
+      seedEventAtTs(db, ts, i);
+    }
+
+    // Baseline: default policy (no pressure caps crossed) archives nothing —
+    // these rows are only 5 days old.
+    const baseline = await runArchivalSweep(db, {
+      stateDbPath: dbPath,
+      nowMs: NOW,
+      rowCountSoftCap: 1_000_000,
+      rowCountHardCap: 2_000_000,
+      dbSizeSoftCapBytes: 1e12,
+      dbSizeHardCapBytes: 2e12,
+    });
+    expect(baseline.retention_days).toBe(30);
+    expect(baseline.deleted).toBe(0);
+
+    // Under HIGH row-count pressure (tiny caps), the window compresses to the
+    // 2-day floor → the 5-day-old rows now fall PAST the cutoff and archive.
+    const pressured = await runArchivalSweep(db, {
+      stateDbPath: dbPath,
+      nowMs: NOW,
+      rowCountSoftCap: 0,
+      rowCountHardCap: 1,
+      dbSizeSoftCapBytes: 1e12,
+      dbSizeHardCapBytes: 2e12,
+      minRetentionDays: 2,
+    });
+    expect(pressured.pressure).toBe(1);
+    expect(pressured.retention_days).toBe(2);
+    expect(pressured.deleted).toBeGreaterThan(0);
+    expect(pressured.archived_by_month["2026-05"]).toBeGreaterThan(0);
+  });
+
+  test("SAFETY: candidate_confirmed and origin_calibration_recorded are NEVER lost under max pressure", async () => {
+    // Seed credit-spine + calibration rows 5 days ago (young, but pressure
+    // compresses the window to 2 days — so a naive policy could touch them).
+    const fiveDaysAgo = new Date(NOW - 5 * 24 * 60 * 60 * 1000).toISOString();
+    const ccIds: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const ev = emitEvent(db, { kind: "candidate_confirmed" as Parameters<typeof emitEvent>[1]["kind"], payload: { idx: i } });
+      db.run("UPDATE events SET ts = ? WHERE id = ?", [fiveDaysAgo, ev.id]);
+      ccIds.push(ev.id);
+    }
+    for (let i = 0; i < 3; i++) {
+      const ev = emitEvent(db, {
+        kind: "origin_calibration_recorded" as Parameters<typeof emitEvent>[1]["kind"],
+        payload: { origin: "brain", role: "designer", predicted_confidence: 0.7, observed_success_probability: 0.6, calibration_error: 0.1 },
+      });
+      db.run("UPDATE events SET ts = ? WHERE id = ?", [fiveDaysAgo, ev.id]);
+    }
+    // Plus ordinary archivable rows so the sweep actually runs.
+    for (let i = 0; i < 10; i++) {
+      seedEventAtTs(db, new Date(NOW - 5 * 24 * 60 * 60 * 1000 + i * 1000).toISOString(), 500 + i);
+    }
+
+    const ccBefore = eventsCount(db, "candidate_confirmed");
+    const ocBefore = eventsCount(db, "origin_calibration_recorded");
+    expect(ccBefore).toBe(5);
+    expect(ocBefore).toBe(3);
+
+    // Maximum pressure → 2-day window → 5-day-old rows are past the cutoff.
+    await runArchivalSweep(db, {
+      stateDbPath: dbPath,
+      nowMs: NOW,
+      rowCountSoftCap: 0,
+      rowCountHardCap: 1,
+      dbSizeSoftCapBytes: 1e12,
+      dbSizeHardCapBytes: 2e12,
+      minRetentionDays: 2,
+    });
+
+    // candidate_confirmed is ALWAYS_KEEP — never archived/deleted by the
+    // pressure-compressed sweep (it is excluded from the candidate scan).
+    expect(eventsCount(db, "candidate_confirmed")).toBe(5);
+    // origin_calibration_recorded is excluded from the archival move-to-cold
+    // (it is rolled up + evicted on the telemetry path, not the archival
+    // path) — the archival sweep must leave every row in place.
+    expect(eventsCount(db, "origin_calibration_recorded")).toBe(3);
   });
 });

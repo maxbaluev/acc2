@@ -93,6 +93,13 @@ const ALWAYS_KEEP_KINDS = new Set<string>([
   "causal_edge_observed",
   "causal_edge_credited",
   "retrieval_credit_attributed",
+  // Credit/retrieval citation-binding spine: consumed by runtime/credit.ts
+  // (Beta-posterior credit per cited knowledge id) and
+  // runtime/dense_closure_credit.ts. Pressure-triggered curation compresses
+  // the archival window onto YOUNGER rows, so candidate_confirmed MUST be
+  // ALWAYS_KEEP — moving it to cold (even though recoverable) would pull the
+  // live credit spine out of the hot ledger. NON-prunable / NON-evicted.
+  "candidate_confirmed",
   "knowledge_candidate",
   "act_artifact_candidate",
   "act_artifact_admitted",
@@ -400,6 +407,160 @@ export type ArchivalSweepOptions = {
   nowMs?: number;
   retentionDays?: number; // override; default reads from threshold registry
   sweepLimit?: number;
+  // Pressure-policy overrides (curation). When unset the policy reads its
+  // thresholds from the registry (with the constants below as fallback).
+  rowCountSoftCap?: number;
+  rowCountHardCap?: number;
+  dbSizeSoftCapBytes?: number;
+  dbSizeHardCapBytes?: number;
+  minRetentionDays?: number;
+};
+
+// ── Pressure-triggered bounded-ledger curation policy (amendment
+// CS4WFHZM7H4TN425GRSW39ZVMG) ─────────────────────────────────────────
+//
+// The defect this replaces: archival moved rows to cold storage SOLELY on
+// a fixed 30-day age. On a young high-volume DB nothing is 30 days old, so
+// the move-to-cold sweep never fires and the hot ledger grows unbounded
+// toward multi-GB (slow boot) before any row ages out. Meanwhile a SECOND
+// independent magic-number worker (compaction's derived-telemetry prune)
+// bounds a different slice by a different fixed age. Two policies, two
+// magic numbers, neither driven by the actual signal that matters: how
+// much PRESSURE the hot ledger is under right now (row-count / db-size /
+// boot-cost).
+//
+// This function unifies the trigger. It scores ledger pressure from
+// row-count and on-disk page size and COMPRESSES the archival retention
+// window when pressure is high — so move-to-cold fires on YOUNGER rows
+// (down to a floor) the moment the ledger crosses a soft cap, long before
+// any row is 30 days old. Under no pressure it returns the default
+// 30-day window, preserving the original age-based behavior exactly.
+//
+// SAFETY: this policy only shifts the AGE CUTOFF for the move-to-cold
+// archival sweep. That sweep already EXCLUDES every credit-spine and
+// owner-channel kind via ALWAYS_KEEP_KINDS, and move-to-cold is
+// loss-preserving (rows land in state-archive-YYYY-MM.db, recoverable via
+// substrate/cold_db.ts) — never a bare DELETE. candidate_confirmed and
+// origin_calibration_recorded are therefore NEVER lost by this policy:
+// candidate_confirmed is not archived at all unless ALWAYS_KEEP is
+// changed, and origin_calibration_recorded is rolled up before eviction
+// on the telemetry path. The pressure policy does not touch the
+// compaction DELETE path (compactDerivedEvents) nor the telemetry
+// eviction allowlist; both keep their own conservative carve-outs.
+
+/** Default retention window (days) when the hot ledger is NOT under
+ *  pressure — preserves the original 30-day age-based archival behavior. */
+const DEFAULT_HOT_RETENTION_DAYS = 30;
+/** Floor: even at maximum pressure the policy will not compress the hot
+ *  retention window below this many days, so recent operating context
+ *  (and any in-flight dispatch chains) stay hot. */
+const MIN_HOT_RETENTION_DAYS = 2;
+/** Soft row-count cap: above this, retention starts compressing linearly
+ *  from DEFAULT toward MIN as the ledger fills toward the hard cap. */
+const ROW_COUNT_SOFT_CAP = 250_000;
+/** Hard row-count cap: at/above this the retention window is fully
+ *  compressed to MIN_HOT_RETENTION_DAYS — maximum archival pressure. */
+const ROW_COUNT_HARD_CAP = 500_000;
+/** Soft db-size cap (bytes): page_count × page_size above this also
+ *  compresses retention. ~1.0 GB. */
+const DB_SIZE_SOFT_CAP_BYTES = 1_000_000_000;
+/** Hard db-size cap (bytes): at/above this, retention fully compresses.
+ *  ~2.5 GB — below the ~3 GB slow-boot ceiling the live DB was trending
+ *  toward, so archival fires well before boot cost becomes pathological. */
+const DB_SIZE_HARD_CAP_BYTES = 2_500_000_000;
+
+export type LedgerPressure = {
+  /** Current hot-ledger row count. */
+  row_count: number;
+  /** Current on-disk size (page_count × page_size) in bytes. */
+  db_size_bytes: number;
+  /** Normalized pressure in [0,1]: 0 = at/below soft cap, 1 = at/above
+   *  hard cap. The max of the row-count and db-size pressures. */
+  pressure: number;
+  /** Which signal drove the pressure ("row_count" | "db_size" | "none"). */
+  pressure_source: "row_count" | "db_size" | "none";
+  /** Retention window the policy chose, in days. Compressed from
+   *  DEFAULT_HOT_RETENTION_DAYS toward MIN_HOT_RETENTION_DAYS as pressure
+   *  rises. */
+  hot_retention_days: number;
+};
+
+const linearPressure = (value: number, soft: number, hard: number): number => {
+  if (hard <= soft) return value >= hard ? 1 : 0;
+  if (value <= soft) return 0;
+  if (value >= hard) return 1;
+  return (value - soft) / (hard - soft);
+};
+
+const readDbSizeBytes = (db: Database): number => {
+  try {
+    const pageCount = (db.query("PRAGMA page_count").get() as { page_count: number } | null)?.page_count ?? 0;
+    const pageSize = (db.query("PRAGMA page_size").get() as { page_size: number } | null)?.page_size ?? 4096;
+    return pageCount * pageSize;
+  } catch {
+    return 0;
+  }
+};
+
+const readRowCount = (db: Database): number => {
+  try {
+    return (db.query("SELECT COUNT(*) AS c FROM events").get() as { c: number } | null)?.c ?? 0;
+  } catch {
+    return 0;
+  }
+};
+
+/** Score current hot-ledger pressure and choose the archival retention
+ *  window. Pressure compresses the window so the move-to-cold sweep fires
+ *  on younger rows the moment the ledger crosses its soft cap — bounding
+ *  the ledger by row-count / db-size, NOT solely by a fixed 30-day age.
+ *  Composes with (does not duplicate) the compaction derived-telemetry
+ *  prune and the telemetry eviction allowlist. */
+export const evaluateLedgerCurationPressure = (
+  db: Database,
+  opts: ArchivalSweepOptions,
+  _nowMs: number,
+): LedgerPressure => {
+  // An explicit retentionDays override (tests, manual sweep) bypasses the
+  // pressure policy entirely — caller is asserting the exact window.
+  const explicitOverride = typeof opts.retentionDays === "number" ? opts.retentionDays : null;
+
+  const rowCount = readRowCount(db);
+  const dbSizeBytes = readDbSizeBytes(db);
+
+  const rowSoft = opts.rowCountSoftCap ?? getThreshold(db, "ledger_row_count_soft_cap", ROW_COUNT_SOFT_CAP);
+  const rowHard = opts.rowCountHardCap ?? getThreshold(db, "ledger_row_count_hard_cap", ROW_COUNT_HARD_CAP);
+  const sizeSoft = opts.dbSizeSoftCapBytes ?? getThreshold(db, "ledger_db_size_soft_cap_bytes", DB_SIZE_SOFT_CAP_BYTES);
+  const sizeHard = opts.dbSizeHardCapBytes ?? getThreshold(db, "ledger_db_size_hard_cap_bytes", DB_SIZE_HARD_CAP_BYTES);
+  const minRetention = opts.minRetentionDays ?? getThreshold(db, "ledger_min_retention_days", MIN_HOT_RETENTION_DAYS);
+  const defaultRetention = explicitOverride ?? getThreshold(db, "archival_retention_days", DEFAULT_HOT_RETENTION_DAYS);
+
+  const rowPressure = linearPressure(rowCount, rowSoft, rowHard);
+  const sizePressure = linearPressure(dbSizeBytes, sizeSoft, sizeHard);
+  const pressure = Math.max(rowPressure, sizePressure);
+  const pressureSource: LedgerPressure["pressure_source"] =
+    pressure === 0 ? "none" : rowPressure >= sizePressure ? "row_count" : "db_size";
+
+  // An explicit retentionDays override pins the window — pressure is still
+  // REPORTED (for status surfaces) but does not move the cutoff.
+  let hotRetentionDays: number;
+  if (explicitOverride !== null) {
+    hotRetentionDays = explicitOverride;
+  } else {
+    // Compress linearly from the default window toward the floor as
+    // pressure rises. pressure=0 → default (30d); pressure=1 → floor (2d).
+    const span = Math.max(0, defaultRetention - minRetention);
+    hotRetentionDays = Math.round(defaultRetention - pressure * span);
+    if (hotRetentionDays < minRetention) hotRetentionDays = minRetention;
+  }
+
+  return {
+    row_count: rowCount,
+    db_size_bytes: dbSizeBytes,
+    pressure,
+    pressure_source: pressureSource,
+    hot_retention_days: hotRetentionDays,
+  };
 };
 
 export type ArchivalSummary = {
@@ -411,6 +572,13 @@ export type ArchivalSummary = {
   cutoff_iso: string;
   emitted_event_id?: string;
   skipped: boolean;
+  // Pressure-policy telemetry (amendment CS4WFHZM7H4TN425GRSW39ZVMG): the
+  // signals that drove the chosen retention window, so the status surface
+  // can show WHY archival fired (or didn't).
+  pressure?: number;
+  pressure_source?: "row_count" | "db_size" | "none";
+  row_count?: number;
+  db_size_bytes?: number;
 };
 
 const archivePathForMonth = (stateDbPath: string, yyyymm: string): string => {
@@ -463,8 +631,12 @@ export const runArchivalSweep = async (
   opts: ArchivalSweepOptions,
 ): Promise<ArchivalSummary> => {
   const now = opts.nowMs ?? Date.now();
-  const retentionDays =
-    opts.retentionDays ?? getThreshold(hotDb, "archival_retention_days", 30);
+  // Pressure-triggered curation: the retention window compresses as the hot
+  // ledger fills (row-count / db-size), so move-to-cold fires on younger
+  // rows under pressure instead of waiting for a fixed 30-day age. Under no
+  // pressure this returns the default 30-day window (original behavior).
+  const policy = evaluateLedgerCurationPressure(hotDb, opts, now);
+  const retentionDays = policy.hot_retention_days;
   const cutoffMs = now - retentionDays * 24 * 60 * 60 * 1000;
   const cutoffIso = new Date(cutoffMs).toISOString();
   const limit = opts.sweepLimit ?? SWEEP_LIMIT;
@@ -477,6 +649,10 @@ export const runArchivalSweep = async (
     retention_days: retentionDays,
     cutoff_iso: cutoffIso,
     skipped: false,
+    pressure: policy.pressure,
+    pressure_source: policy.pressure_source,
+    row_count: policy.row_count,
+    db_size_bytes: policy.db_size_bytes,
   };
 
   // 1. Select candidate rows from hot, bounded. Mnemonic-sovereignty
@@ -523,6 +699,10 @@ export const runArchivalSweep = async (
           errors: 0,
           retention_days: retentionDays,
           cutoff_iso: cutoffIso,
+          pressure: policy.pressure,
+          pressure_source: policy.pressure_source,
+          row_count: policy.row_count,
+          db_size_bytes: policy.db_size_bytes,
         } as JsonValue,
       });
       summary.emitted_event_id = emitted.id;
@@ -706,6 +886,10 @@ export const runArchivalSweep = async (
         errors: summary.errors,
         retention_days: retentionDays,
         cutoff_iso: cutoffIso,
+        pressure: policy.pressure,
+        pressure_source: policy.pressure_source,
+        row_count: policy.row_count,
+        db_size_bytes: policy.db_size_bytes,
       } as JsonValue,
     });
     summary.emitted_event_id = emitted.id;
