@@ -612,6 +612,14 @@ export const detectNoClosureProgressLoop = (
     "contract_amendment_proposed",
     "act_artifact_candidate",
     "knowledge_candidate",
+    // Owner/closure-blocked signals: a task legitimately waiting on owner
+    // input or blocked on high-residual closure IS making progress — it is
+    // not stalled. Counting these prevents the no-closure-progress fallback
+    // from force-failing them as a redispatch_storm.
+    "owner_input_required",
+    "hidl_action_required",
+    "closure_blocked_high_residual",
+    "closure_blocked_no_amendments",
   ];
   const progressKindList = progressKinds.map((k) => `'${k}'`).join(", ");
 
