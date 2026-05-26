@@ -28,7 +28,9 @@ import { recordInterferenceEdge, type InterferenceEdgeKind } from "../interferen
 import { findRecipeMatchPooled } from "../recipe_replay";
 import { findSimilarRecentCandidate } from "../knowledge_dedup";
 import { newId } from "../ids";
-import { evaluateClosureCommitGate } from "../closure_audit";
+// Routed through the unified closure facade (directive_closure.ts) — one
+// closure import path; the gate's source of truth stays in closure_audit.ts.
+import { evaluateClosureCommitGate } from "../directive_closure";
 import {
   dispatchResolved,
   dispatchResolvedPooled,

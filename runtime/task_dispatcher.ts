@@ -65,8 +65,10 @@ import {
   cascadeUpwardWhenChildrenTerminal,
   maybeCloseFinishedDirective,
   rootCommitReadiness,
+  // Routed through the unified closure facade (directive_closure.ts) rather
+  // than reaching into closure_audit.ts directly — one closure import path.
+  closureResidualsForLineage,
 } from "./directive_closure";
-import { closureResidualsForLineage } from "./closure_audit";
 import { readCurrentMode } from "./crisis_mode";
 import { isCycleViolation } from "./cycle_one_gate";
 import { recordDispatch, recordActionResidual } from "./metrics";
