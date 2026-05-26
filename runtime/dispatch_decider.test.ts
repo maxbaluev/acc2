@@ -526,6 +526,49 @@ describe("dispatch_decider — active strategy ranking (amendment A12ET3SF)", ()
   });
 });
 
+// ── Refinement: task-shape runtime selection (buildRuntimeSelectionEvidence) ──
+describe("dispatch_decider — task-shape runtime selection", () => {
+  test("a python-shaped task text scores uv highest among runtimes", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: "d_py",
+      payload: { directive_text: "Load the CSV with pandas and run a numpy regression in python", lifecycle: "finite" },
+    });
+    const decision = decideDispatch(db, sampleTask({
+      directive_id: "d_py",
+      goal: "analyze data with pandas numpy in python",
+    } as Partial<TaskNode>));
+    const rs = decision.runtime_selection;
+    expect(rs).toBeDefined();
+    expect(rs!.selected_runtime).toBe("uv");
+    expect(rs!.candidate_scores.uv).toBeGreaterThan(rs!.candidate_scores.bun ?? 0);
+    expect(rs!.candidate_scores.uv).toBeGreaterThan(rs!.candidate_scores["camofox-browser"] ?? 0);
+  });
+
+  test("a browser-shaped task text scores camofox-browser highest among runtimes", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: "d_browser",
+      payload: { directive_text: "Navigate to the url and scrape the web page, click through the chromium DOM", lifecycle: "finite" },
+    });
+    const decision = decideDispatch(db, sampleTask({
+      directive_id: "d_browser",
+      goal: "scrape and navigate the browser web page url",
+    } as Partial<TaskNode>));
+    const rs = decision.runtime_selection;
+    expect(rs).toBeDefined();
+    expect(rs!.selected_runtime).toBe("camofox-browser");
+    expect(rs!.candidate_scores["camofox-browser"]).toBeGreaterThan(rs!.candidate_scores.bun ?? 0);
+    expect(rs!.candidate_scores["camofox-browser"]).toBeGreaterThan(rs!.candidate_scores.uv ?? 0);
+  });
+});
+
 // ── Amendment XN9P09R6 — no stale hard-task preclassifier ──────────
 import * as DispatchDeciderModule from "./dispatch_decider";
 

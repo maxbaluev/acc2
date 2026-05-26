@@ -1911,6 +1911,76 @@ describe("T4.3 brain accuracy — predicted vs observed residual posterior", () 
       .get() as { c: number };
     expect(rows.c).toBe(1);
   });
+
+  test("credit_posterior_calibration_drift dedupes by drift_signature within the 6h window", async () => {
+    const db = openDb(":memory:");
+    insertSampleArtifact(db, "art_action", "// action body");
+    insertSampleArtifact(db, "art_verifier", "// verifier body");
+    // Pre-seed the per-goal_shape brain_accuracy_predicate posterior into the
+    // drift band (score < 0.45, confidence >= 0.3) so every high-error sample
+    // trips the emitter gate. drift_signature is the goal_shape ("" → default).
+    const accId = __brainAccuracyArtifactIdForTest("");
+    insertSampleArtifact(db, accId, "// brain_accuracy_predicate goal_shape=default", {
+      initialAlpha: 1,
+      initialBeta: 40,
+      score: 0.05,
+      confidence: 0.6,
+    });
+
+    const runHighErrorSample = async (suffix: string): Promise<void> => {
+      const ap = emitEvent(db, {
+        kind: "action_predicted",
+        substrate_origin: "opencode",
+        directive_id: "d_drift_" + suffix,
+        task_id: "t_drift_" + suffix,
+        action_artifact_id: "art_action",
+        verifier_artifact_id: "art_verifier",
+        predicted_residual: 0.05,
+        payload: {},
+      });
+      const obs = emitEvent(db, {
+        kind: "artifact_observed",
+        substrate_origin: "substrate_auto",
+        directive_id: "d_drift_" + suffix,
+        task_id: "t_drift_" + suffix,
+        action_artifact_id: "art_action",
+        payload: {},
+      });
+      const scored = emitEvent(db, {
+        kind: "action_scored",
+        substrate_origin: "substrate_auto",
+        directive_id: "d_drift_" + suffix,
+        task_id: "t_drift_" + suffix,
+        action_artifact_id: "art_action",
+        verifier_artifact_id: "art_verifier",
+        residual: 0.95,
+        payload: {},
+      });
+      await distributeCredit(db, {
+        action_event_id: ap.id,
+        observation_event_id: obs.id,
+        scored_event_id: scored.id,
+        predicted_residual: 0.05,
+        observed_residual: 0.95,
+      });
+    };
+
+    // First high-error sample: drift emitter fires once.
+    await runHighErrorSample("a");
+    const afterFirst = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'brain_invocation_request' AND json_extract(payload, '$.request_reason') = 'credit_posterior_calibration_drift'")
+      .get() as { c: number };
+    expect(afterFirst.c).toBe(1);
+
+    // Second high-error sample with the SAME drift_signature inside the 6h
+    // window: a distinct action/scored pair (new observation), but the drift
+    // emitter is deduped — no second brain_invocation_request.
+    await runHighErrorSample("b");
+    const afterSecond = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'brain_invocation_request' AND json_extract(payload, '$.request_reason') = 'credit_posterior_calibration_drift'")
+      .get() as { c: number };
+    expect(afterSecond.c).toBe(1);
+  });
 });
 
 // T4.4 coalition / joint-citation posterior (roadmap.md §T4.4) — when

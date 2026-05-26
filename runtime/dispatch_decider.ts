@@ -488,31 +488,72 @@ const readRuntimeArtifactEvidence = (db: Database): { scores: Record<string, num
   return { scores, cited };
 };
 
-const buildRuntimeSelectionEvidence = (db: Database, task: TaskNode, targets: string[]): RuntimeSelectionEvidence => {
+const buildRuntimeSelectionEvidence = (db: Database, task: TaskNode, text: string, targets: string[]): RuntimeSelectionEvidence => {
+  void task;
   const runtimes = new Set(["bun", "uv", "camofox-browser"]);
   const availability = readRuntimeAvailabilityEvidence(db);
   const artifacts = readRuntimeArtifactEvidence(db);
   for (const runtime of Object.keys(availability)) runtimes.add(runtime);
   for (const runtime of Object.keys(artifacts.scores)) runtimes.add(runtime);
+
   const structural: Record<string, number> = {};
-  for (const runtime of runtimes) structural[runtime] = 0.34;
+  const taskShape: Record<string, number> = {};
+  const outcome: Record<string, { weighted: number; weight: number }> = {};
+  for (const runtime of runtimes) {
+    structural[runtime] = 0.34;
+    taskShape[runtime] = 0.34;
+  }
   for (const ref of targets) {
     if (ref.startsWith("runtime:bun:")) structural.bun = Math.max(structural.bun ?? 0, 0.95);
     if (ref.startsWith("runtime:python:") || ref.startsWith("runtime:uv:")) structural.uv = Math.max(structural.uv ?? 0, 0.95);
     if (ref.startsWith("runtime:browser:") || ref.startsWith("browser_session:")) structural["camofox-browser"] = Math.max(structural["camofox-browser"] ?? 0, 0.95);
   }
+
+  const normalized = text.toLowerCase();
+  const addShape = (runtime: string, score: number): void => {
+    runtimes.add(runtime);
+    taskShape[runtime] = Math.max(taskShape[runtime] ?? 0.34, clamp01(score));
+  };
+  // Task-shape evidence is soft residual evidence, not a routing gate: words can
+  // lift a runtime, but artifact posterior/outcomes and availability still blend.
+  if (/\b(python|py|uv|pip|pandas|numpy|scipy|sklearn|scikit|pytorch|torch|tensorflow|pil|opencv|jupyter|notebook|dataframe|csv|parquet|machine learning|\bml\b)\b/.test(normalized)) addShape("uv", 0.88);
+  if (/\b(browser|browse|scrape|crawl|navigate|click|chromium|web page|webpage|url|http|https|dom|screenshot|camofox)\b/.test(normalized)) addShape("camofox-browser", 0.86);
+  if (/\b(typescript|javascript|bun|node|tsx|ts\b|js\b|cli|repo|sqlite|http api|json|markdown|regex|text)\b/.test(normalized)) addShape("bun", 0.72);
+  if (!/\b(python|pandas|numpy|browser|scrape|navigate|url|chromium|camofox)\b/.test(normalized)) addShape("bun", 0.58);
+
+  try {
+    const rows = db.query(`SELECT residual, payload FROM events WHERE kind = 'action_scored' AND residual IS NOT NULL ORDER BY ts DESC, rowid DESC LIMIT 200`).all() as Array<{ residual: number | null; payload: string | null }>;
+    for (const row of rows) {
+      const p = safeJson(row.payload ?? "{}");
+      if (!p || typeof p !== "object" || Array.isArray(p)) continue;
+      const selected = (((p as Record<string, unknown>).dispatch_decision as Record<string, unknown> | undefined)?.runtime_selection as Record<string, unknown> | undefined)?.selected_runtime;
+      if (typeof selected !== "string") continue;
+      runtimes.add(selected);
+      const residual = clamp01(row.residual ?? 1);
+      const prev = outcome[selected] ?? { weighted: 0, weight: 0 };
+      outcome[selected] = { weighted: prev.weighted + (1 - residual), weight: prev.weight + 1 };
+    }
+  } catch { /* cold start */ }
+
   const candidate_scores: Record<string, number> = {};
   for (const runtime of runtimes) {
     const diag = availability[runtime] as Record<string, unknown> | undefined;
     const unavailablePenalty = diag?.fault_kind === "runtime_unavailable" ? 0.35 : 0;
-    candidate_scores[runtime] = clamp01((structural[runtime] ?? 0.34) * 0.55 + (artifacts.scores[runtime] ?? 0.5) * 0.45 - unavailablePenalty);
+    const outcomeScore = outcome[runtime] && outcome[runtime]!.weight > 0 ? outcome[runtime]!.weighted / outcome[runtime]!.weight : 0.5;
+    candidate_scores[runtime] = clamp01(
+      (structural[runtime] ?? 0.34) * 0.35
+      + (taskShape[runtime] ?? 0.34) * 0.30
+      + (artifacts.scores[runtime] ?? 0.5) * 0.25
+      + outcomeScore * 0.10
+      - unavailablePenalty,
+    );
   }
   let selected_runtime: string | null = null;
   let best = -1;
   for (const [runtime, score] of Object.entries(candidate_scores)) if (score > best) { selected_runtime = runtime; best = score; }
   const predicted_residual_by_runtime: Record<string, number> = {};
   for (const [runtime, score] of Object.entries(candidate_scores)) predicted_residual_by_runtime[runtime] = clamp01(1 - score);
-  return { candidate_scores, selected_runtime, predicted_residual_by_runtime, availability_by_runtime: availability, cited_artifact_ids: artifacts.cited, scorer_artifact_ids: ["runtime_selector_v1"] };
+  return { candidate_scores, selected_runtime, predicted_residual_by_runtime, availability_by_runtime: availability, cited_artifact_ids: artifacts.cited, scorer_artifact_ids: ["runtime_selector_v2_task_shape_outcome"] };
 };
 
 const evidenceForSelectedRoute = (
