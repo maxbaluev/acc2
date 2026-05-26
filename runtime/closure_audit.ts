@@ -531,6 +531,15 @@ const verifyOwnerFacingDeliverableBody = (
   ];
   if (typeof predicate.deliverable_artifact_id === "string") artifactIds.push(predicate.deliverable_artifact_id);
   const acceptanceCriteria = stringArrayField(predicate.acceptance_criteria);
+  // Deliverable compounding: closure verifies the CUMULATIVE requirements
+  // ledger, not just the newest acceptance_criteria. A new version may satisfy
+  // the latest critique while silently dropping an older satisfied requirement.
+  const cumulativeRequirements = [
+    ...acceptanceCriteria,
+    ...stringArrayField(predicate.requirements_ledger),
+    ...stringArrayField(predicate.previously_satisfied_requirements),
+    ...stringArrayField(predicate.non_regression_requirements),
+  ];
   const inspectedRows = artifactIds.flatMap((id) => artifactLineage(db, id));
   const inspectedArtifactIds = Array.from(new Set(inspectedRows.map((r) => r.id)));
   const inspectedBody = inspectedRows.map((r) => r.body).join("\n");
@@ -542,15 +551,34 @@ const verifyOwnerFacingDeliverableBody = (
   if (missingIds.length > 0) failureAxes.missing_artifacts = missingIds.join(",");
   if (inspectedArtifactIds.length > 0 && inspectedBody.trim().length === 0) failureAxes.empty_deliverable_body = "artifact body was empty";
   if (acceptanceCriteria.length === 0) failureAxes.missing_acceptance_criteria = "owner-facing closure supplied no body-check criteria";
+  if (stringArrayField(predicate.requirements_ledger).length === 0 && stringArrayField(predicate.non_regression_requirements).length === 0) {
+    failureAxes.missing_requirements_ledger = "owner-facing deliverable closure supplied no cumulative requirements/non-regression ledger";
+  }
 
-  const missingCriteria = acceptanceCriteria.filter((criterion) => !normalizedBody.includes(normalizedNeedle(criterion)));
+  const missingCriteria = Array.from(new Set(cumulativeRequirements)).filter((criterion) => !normalizedBody.includes(normalizedNeedle(criterion)));
   if (missingCriteria.length > 0) failureAxes.acceptance_criteria_missing_from_body = missingCriteria.join(" | ");
+
+  // Monotonic improvement / regression gate: if a requirement was satisfied in a
+  // PRIOR lineage body but is absent from the CURRENT (head) body, closure fails.
+  // inspectedRows is ordered head→…→root per artifactLineage (supersedes walk).
+  const regressionCriteria = stringArrayField(predicate.previously_satisfied_requirements);
+  if (regressionCriteria.length > 0 && inspectedRows.length > 0) {
+    const currentBody = normalizedNeedle(inspectedRows[0]?.body ?? "");
+    const priorBody = normalizedNeedle(inspectedRows.slice(1).map((r) => r.body).join("\n"));
+    const regressed = regressionCriteria.filter((criterion) => {
+      const needle = normalizedNeedle(criterion);
+      return needle.length > 0 && priorBody.includes(needle) && !currentBody.includes(needle);
+    });
+    if (regressed.length > 0) {
+      failureAxes.regressed_previously_satisfied_requirements = regressed.join(" | ");
+    }
+  }
 
   return {
     verification: {
       verified: Object.keys(failureAxes).length === 0,
       evidence_event_ids: inspectedArtifactIds,
-      query: "SELECT id, kind, body, supersedes FROM act_artifact WHERE id = ? -- walked supersedes lineage",
+      query: "SELECT id, kind, body, supersedes FROM act_artifact WHERE id = ? -- walked supersedes lineage; current artifact must preserve previously_satisfied_requirements from prior body",
     },
     inspectedArtifactIds,
     independentDeliverableBodyReread: inspectedBody.trim().length > 0,

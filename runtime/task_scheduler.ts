@@ -1220,7 +1220,16 @@ const terminateNoProgressRedispatch = (db: Database, task: TaskNode): NoProgress
         substrate_origin: "substrate_auto",
         directive_id: task.directive_id,
         task_id: childTaskId,
-        payload: { kind: "refines", from_task: task.id, to_task: childTaskId } as JsonValue,
+        payload: {
+          kind: "refines",
+          from_task: task.id,
+          to_task: childTaskId,
+          refinement_mode: "deliverable_compounding",
+          base_deliverable_evidence_event_ids: deliverableEvidence,
+          preserve_satisfied_requirements: true,
+          locked_outline_required: true,
+          mutation_contract: "refine prior-best deliverable body; preserve every previously satisfied requirement; change only the targeted delta unless owner input explicitly supersedes it",
+        } as JsonValue,
       });
       // Supersede the unclosed task so it drops out of readyTasks (terminal =
       // committed in topology) and is NOT re-dispatched unchanged — the closure
