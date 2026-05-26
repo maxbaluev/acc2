@@ -4,11 +4,9 @@
 // flows through the daemon: substrate.* via MCP (fastmcp StreamableHTTP),
 // /health + /shutdown via plain HTTP on the auxiliary port.
 
-import { spawn } from "node:child_process";
-import { resolve } from "node:path";
 import {
-  auxBaseUrl, mcpCall, rpcGet, rpcPostAuth, requireAux,
-  readAdminToken, readDaemonLock,
+  auxBaseUrl, mcpCall, rpcGet, requireAux,
+  readDaemonLock,
   MCP_WRITE_TIMEOUT_MS,
   type DaemonLock,
 } from "./rpc";
@@ -233,7 +231,7 @@ const dispatchTask = async (
   });
 };
 
-const daemonStart = async (): Promise<number> => {
+const daemonStart = async (opts: { foregroundChild?: boolean } = {}): Promise<number> => {
   // Role-scoped lock probe (foundational fix: server+worker daemons
   // coexist as two processes with separate lock files). When
   // ACC2_DAEMON_ROLE=worker the lock lives at v2.sock.worker; when
@@ -268,7 +266,6 @@ const daemonStart = async (): Promise<number> => {
       }
     } catch { /* malformed lock; fall through */ }
   }
-  const entry = resolve(import.meta.dirname ?? ".", "..", "runtime", "daemon.ts");
   // PRIOR 2 (never silently fail): pre-fix the daemon spawned with
   // stdio: "ignore", so any startup crash / runtime panic disappeared
   // into /dev/null and operators had no way to diagnose. Now wire
@@ -280,37 +277,49 @@ const daemonStart = async (): Promise<number> => {
   try { fs.mkdirSync(logsDir, { recursive: true }); } catch { /* exists */ }
   const logPath = `${logsDir}/daemon.log`;
   const logFd = fs.openSync(logPath, "a");
-  const child = spawn("bun", [entry], {
-    detached: true,
-    stdio: ["ignore", logFd, logFd],
-    env: { ...process.env },
-  });
-  child.unref();
-  console.log(`daemon spawn requested (pid=${child.pid}); poll with \`acc daemon status\``);
+
+  // CANONICAL launch path: route the spawn through the crash-watchdog
+  // supervisor (cli/daemon.ts:startDaemonSupervised). By default it reaps a
+  // stale lock from a native crash, polls for OS port release, and respawns
+  // EXACTLY ONE daemon (lock-aware — never duplicates; a healthy incumbent or
+  // an alive long-brain-cycle daemon is left completely untouched). This is
+  // what activates the otherwise-dormant watchdog. `--foreground-child` opts
+  // OUT and spawns the raw daemon directly (the prior debugging behaviour).
+  // The role-scoped "already running" refusal above already short-circuits the
+  // common idempotent case before we ever reach here.
+  const { startDaemonSupervised } = await import("./daemon");
+  const result = await startDaemonSupervised({ foregroundChild: opts.foregroundChild, logFd });
+
+  if (result.outcome === "operator_diagnostic_required") {
+    console.error(`daemon start: ${result.detail}`);
+    console.log(`  logs: ${logPath}`);
+    return 1;
+  }
+  if (result.outcome === "already_healthy") {
+    console.log(`daemon already running pid=${result.pid ?? "?"} (${result.detail})`);
+    console.log(`  logs: ${logPath}`);
+    return 0;
+  }
+  console.log(`daemon spawn requested (pid=${result.pid}); poll with \`acc daemon status\``);
   console.log(`  logs: ${logPath}`);
   return 0;
 };
 
 const daemonStop = async (opts: { drainBudgetMs?: number } = {}): Promise<number> => {
-  const base = auxBaseUrl();
-  if (!base) { console.log("daemon not running"); return 0; }
-  const token = readAdminToken();
-  if (!token) { console.error("admin token file missing — cannot stop daemon safely"); return 1; }
-  const body = typeof opts.drainBudgetMs === "number"
-    ? { drain_budget_ms: opts.drainBudgetMs }
-    : {};
-  const timeoutMs = typeof opts.drainBudgetMs === "number"
-    ? opts.drainBudgetMs + 10_000
-    : undefined;
-  const reply = await rpcPostAuth<{ ok?: boolean; error?: string; drain_budget_ms?: number }>(
-    `${base}/shutdown`,
-    token,
-    body,
-    { timeoutMs },
-  );
-  if (!reply.ok) { console.error(`shutdown refused: ${reply.error}`); return 1; }
-  const drain = typeof reply.drain_budget_ms === "number" ? ` drain_budget_ms=${reply.drain_budget_ms}` : "";
-  console.log(`daemon shutdown requested${drain}`);
+  // Route through the client-side bounded stop (cli/daemon.ts:stopDaemonBounded):
+  // it posts /shutdown with the drain budget but caps the CLIENT wait at the
+  // ack-slack window, so `stop`/`restart` ALWAYS return in bounded time even
+  // when a wedged listener never acknowledges (the watchdog reaps + respawns on
+  // the next start). This removes the unbounded ~40s hang the prior path could
+  // exhibit.
+  const { stopDaemonBounded } = await import("./daemon");
+  const result = await stopDaemonBounded({ drainBudgetMs: opts.drainBudgetMs });
+  if (!result.ok) {
+    if (result.detail === "daemon not running") { console.log(result.detail); return 0; }
+    console.error(result.detail);
+    return 1;
+  }
+  console.log(result.detail);
   return 0;
 };
 
@@ -610,7 +619,7 @@ export const runDispatch = async (argv: string[]): Promise<number> => {
     return runVerify(argv.slice(1));
   }
   if (cmd === "daemon") {
-    if (sub === "start")          return daemonStart();
+    if (sub === "start")          return daemonStart({ foregroundChild: argv.includes("--foreground-child") });
     if (sub === "stop")           return daemonStop();
     if (sub === "restart" || sub === "reload") return daemonRestart();
     if (sub === "status")         return daemonStatus();

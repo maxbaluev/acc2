@@ -192,3 +192,97 @@ describe("daemonRestart stale-lock cleanup uses the canonical resolvers", () => 
     expect(block).not.toContain('homedir(), ".accint", "v2.sock"');
   });
 });
+
+// ── Crash-watchdog wiring (follow-on for AHV73KJDK54P3FF7D2NDV9TQ2C) ──
+//
+// The watchdog (runtime/daemon_supervisor.ts) only fires if `acc daemon start`
+// launches the daemon UNDER startDaemonSupervised. These tests pin that the
+// canonical default path routes through the supervisor — and that
+// `--foreground-child` opts OUT — without ever spawning a real daemon: we mock
+// node:child_process spawn so the child is a no-op fake, and spy the watchdog.
+describe("acc daemon start routes through the crash-watchdog supervisor", () => {
+  const src = readFileSync(join(import.meta.dir, "dispatch.ts"), "utf8");
+
+  test("daemonStart delegates to startDaemonSupervised by default", () => {
+    // The spawn now lives in cli/daemon.ts; daemonStart imports and calls the
+    // supervised entry rather than spawning runtime/daemon.ts directly.
+    expect(src).toContain('await import("./daemon")');
+    expect(src).toContain("startDaemonSupervised({ foregroundChild: opts.foregroundChild");
+    // The raw `spawn("bun", [entry], …)` direct-spawn block is gone from
+    // daemonStart — that path now lives only behind the supervisor.
+    const startIdx = src.indexOf("const daemonStart =");
+    const startBody = src.slice(startIdx, src.indexOf("const daemonStop ="));
+    expect(startBody).not.toContain('spawn("bun"');
+  });
+
+  test("`--foreground-child` flag is threaded from the daemon subcommand routing", () => {
+    expect(src).toContain('daemonStart({ foregroundChild: argv.includes("--foreground-child") })');
+  });
+
+  test("daemonStop routes through the bounded stop path", () => {
+    expect(src).toContain("stopDaemonBounded");
+    const stopIdx = src.indexOf("const daemonStop =");
+    const stopBody = src.slice(stopIdx, src.indexOf("const daemonStatus ="));
+    expect(stopBody).toContain('await import("./daemon")');
+    expect(stopBody).toContain("stopDaemonBounded({ drainBudgetMs: opts.drainBudgetMs })");
+  });
+
+  test("default start consults the watchdog when a lock exists; --foreground-child skips it (mocked spawn)", async () => {
+    const { mock } = await import("bun:test");
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+
+    // Isolate state dir + write a lock so the supervised branch reaches the
+    // watchdog. We never spawn a real daemon: spawn is mocked to a fake child.
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "acc2-wd-"));
+    const prevStateDir = process.env.ACC2_STATE_DIR;
+    const prevSock = process.env.ACC2_SOCKET_FILE;
+    process.env.ACC2_STATE_DIR = stateDir;
+    delete process.env.ACC2_SOCKET_FILE;
+
+    const spawnSpy = mock(() => ({ pid: 4242, unref() {} }));
+    mock.module("node:child_process", () => ({ spawn: spawnSpy }));
+
+    const watchdogSpy = mock(async () => ({
+      action: "no_recovery_needed" as const,
+      reason: "lock_healthy",
+      verdict: { reason: "alive" },
+    }));
+    mock.module("../runtime/daemon_supervisor", () => ({ recoverCrashedDaemon: watchdogSpy }));
+
+    // Fresh import so the mocks are in effect for this module instance.
+    // `?wd-test` query suffix forces a fresh module instance so the mocks
+    // above apply. Cast to string so tsc skips module resolution on the
+    // Bun-only query specifier (runtime behavior unchanged).
+    const { startDaemonSupervised } = await import("./daemon?wd-test" as string);
+
+    try {
+      const { resolveSocketFile } = await import("../runtime/state_paths");
+      const lockPath = resolveSocketFile();
+      fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, port: 1, aux_port: 2, role: "all" }));
+
+      // Default (supervised): the watchdog MUST be consulted; spawn is NOT
+      // called directly because the healthy incumbent is left untouched.
+      watchdogSpy.mockClear();
+      spawnSpy.mockClear();
+      const supervised = await startDaemonSupervised({});
+      expect(watchdogSpy).toHaveBeenCalledTimes(1);
+      expect(supervised.outcome).toBe("already_healthy");
+      expect(spawnSpy).not.toHaveBeenCalled();
+
+      // --foreground-child: opts OUT of the watchdog and spawns directly.
+      watchdogSpy.mockClear();
+      spawnSpy.mockClear();
+      const foreground = await startDaemonSupervised({ foregroundChild: true });
+      expect(watchdogSpy).not.toHaveBeenCalled();
+      expect(spawnSpy).toHaveBeenCalledTimes(1);
+      expect(foreground.outcome).toBe("spawned_fresh");
+    } finally {
+      mock.restore();
+      if (prevStateDir === undefined) delete process.env.ACC2_STATE_DIR; else process.env.ACC2_STATE_DIR = prevStateDir;
+      if (prevSock !== undefined) process.env.ACC2_SOCKET_FILE = prevSock;
+      try { fs.rmSync(stateDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
+  });
+});

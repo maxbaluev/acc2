@@ -63,15 +63,24 @@ export type SupervisedStartResult = {
  * `foregroundChild:true` skips the watchdog and spawns the raw daemon.
  */
 export const startDaemonSupervised = async (
-  opts: { foregroundChild?: boolean } = {},
+  opts: { foregroundChild?: boolean; logFd?: number } = {},
 ): Promise<SupervisedStartResult> => {
   const entry = resolveDaemonEntry();
   const stateDir = resolveStateDir();
 
+  // When the caller provides a log fd (the `acc daemon start` CLI does, to
+  // preserve the operator-tailable ${stateDir}/logs/daemon.log) the fresh
+  // child's stdout/stderr are wired there instead of /dev/null, so a silent
+  // startup death still leaves a trace.
+  const childStdio: ["ignore", number | "ignore", number | "ignore"] =
+    typeof opts.logFd === "number"
+      ? ["ignore", opts.logFd, opts.logFd]
+      : ["ignore", "ignore", "ignore"];
+
   const spawnFresh = (): SupervisedStartResult => {
     const child = spawn("bun", [entry], {
       detached: true,
-      stdio: ["ignore", "ignore", "ignore"],
+      stdio: childStdio,
       env: { ...process.env },
     });
     child.unref();
