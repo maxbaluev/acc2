@@ -177,7 +177,7 @@ describe("extractTrajectoryMotifs", () => {
     expect(body.avg_closure_residual).toBeCloseTo(0.5, 6);
   });
 
-  test("score calibration: a motif with matching low-residual closures gets score>0.5 (not stuck at 0.5)", async () => {
+  test("outcome posterior seed: a motif with matching low-residual closures gets a posterior (alpha up, score>0.5) — not stuck at the flat Beta(1,1)", async () => {
     const db = openDb(":memory:");
     // A motif whose TAIL is task_closure_audited across three directives,
     // each closing with a LOW residual (good recipe). The closure event is
@@ -197,21 +197,89 @@ describe("extractTrajectoryMotifs", () => {
 
     const row = db
       .query(
-        `SELECT score, recent_residual_mean, body FROM act_artifact
+        `SELECT score, posterior_alpha, posterior_beta, body FROM act_artifact
           WHERE kind = 'trajectory_motif_predicate'
             AND name = 'task_node_opened>task_committed>task_closure_audited'`,
       )
-      .get() as { score: number; recent_residual_mean: number; body: string };
+      .get() as { score: number; posterior_alpha: number; posterior_beta: number; body: string };
     expect(row).toBeTruthy();
     const body = JSON.parse(row.body) as Record<string, unknown>;
     expect(body.avg_closure_residual).toBeCloseTo(0.1, 6);
-    // score = clamp(1 - 0.1) = 0.9 → no longer stuck at the 0.5 cold-start.
+    // The score is now the Beta posterior MEAN (alpha/(alpha+beta)), seeded by
+    // applyResidualOutcome — NOT a direct 1-avg_residual overwrite. A low
+    // residual (0.1) pushes alpha above the flat cold-start so the posterior
+    // mean clears 0.5: the motif is a SCORED-by-outcome object now.
+    expect(row.posterior_alpha).toBeGreaterThan(1); // evidence accrued to alpha
+    expect(row.posterior_beta).toBeCloseTo(1, 6); // low residual ⇒ no beta
     expect(row.score).toBeGreaterThan(0.5);
-    expect(row.score).toBeCloseTo(0.9, 6);
-    expect(row.recent_residual_mean).toBeCloseTo(0.1, 6);
+    // Posterior mean of Beta(1+0.6667, 1) = 1.6667/2.6667 ≈ 0.625, not 0.9.
+    expect(row.score).toBeCloseTo(0.625, 2);
   });
 
-  test("score calibration: a motif with no closure evidence stays at the cold-start 0.5", async () => {
+  test("outcome posterior: a HIGH-residual motif accrues beta (score<0.5), proving the posterior is updated BY OUTCOME (not frequency)", async () => {
+    const db = openDb(":memory:");
+    // Same recurring motif, but the directives all CLOSED POORLY (high
+    // residual). A frequency-only score would still be 0.5; an outcome
+    // posterior must drop below 0.5 because beta accrues.
+    for (const directiveId of ["d_bad1", "d_bad2", "d_bad3"]) {
+      insertEvent(db, { kind: "task_node_opened", directive_id: directiveId });
+      insertEvent(db, { kind: "task_committed", directive_id: directiveId });
+      insertEvent(db, {
+        kind: "task_closure_audited",
+        directive_id: directiveId,
+        payload: { closure_residual: 0.95 },
+      });
+    }
+
+    await extractTrajectoryMotifs(db);
+    const row = db
+      .query(
+        `SELECT score, posterior_alpha, posterior_beta FROM act_artifact
+          WHERE kind = 'trajectory_motif_predicate'
+            AND name = 'task_node_opened>task_committed>task_closure_audited'`,
+      )
+      .get() as { score: number; posterior_alpha: number; posterior_beta: number };
+    expect(row).toBeTruthy();
+    expect(row.posterior_beta).toBeGreaterThan(1); // failure evidence → beta up
+    expect(row.score).toBeLessThan(0.5); // posterior mean below cold-start
+  });
+
+  test("posterior seed is ONE-SHOT at admission: re-running the extractor does NOT double-count evidence", async () => {
+    const db = openDb(":memory:");
+    for (const directiveId of ["d_o1", "d_o2", "d_o3"]) {
+      insertEvent(db, { kind: "task_node_opened", directive_id: directiveId });
+      insertEvent(db, { kind: "task_committed", directive_id: directiveId });
+      insertEvent(db, {
+        kind: "task_closure_audited",
+        directive_id: directiveId,
+        payload: { closure_residual: 0.1 },
+      });
+    }
+    await extractTrajectoryMotifs(db);
+    const after1 = db
+      .query(
+        `SELECT posterior_alpha, score FROM act_artifact
+          WHERE kind = 'trajectory_motif_predicate'
+            AND name = 'task_node_opened>task_committed>task_closure_audited'`,
+      )
+      .get() as { posterior_alpha: number; score: number };
+    // Second tick re-observes the same motif (already_present) — must NOT
+    // re-seed the posterior (would double-count the closure evidence).
+    const second = await extractTrajectoryMotifs(db);
+    expect(second.motifs_admitted).toBe(0);
+    expect(second.motifs_score_calibrated).toBe(0);
+    const after2 = db
+      .query(
+        `SELECT posterior_alpha, score FROM act_artifact
+          WHERE kind = 'trajectory_motif_predicate'
+            AND name = 'task_node_opened>task_committed>task_closure_audited'`,
+      )
+      .get() as { posterior_alpha: number; score: number };
+    expect(after2.posterior_alpha).toBeCloseTo(after1.posterior_alpha, 6);
+    expect(after2.score).toBeCloseTo(after1.score, 6);
+  });
+
+  test("a motif with no closure evidence stays at the flat cold-start posterior (score 0.5)", async () => {
     const db = openDb(":memory:");
     const seq = ["directive_opened", "task_node_opened", "task_committed"];
     insertSequence(db, "d_p", seq);
@@ -222,12 +290,14 @@ describe("extractTrajectoryMotifs", () => {
     expect(summary.motifs_score_calibrated).toBe(0);
     const row = db
       .query(
-        `SELECT score FROM act_artifact
+        `SELECT score, posterior_alpha, posterior_beta FROM act_artifact
           WHERE kind = 'trajectory_motif_predicate'
             AND name = 'directive_opened>task_node_opened>task_committed'`,
       )
-      .get() as { score: number };
+      .get() as { score: number; posterior_alpha: number; posterior_beta: number };
     expect(row.score).toBeCloseTo(0.5, 8);
+    expect(row.posterior_alpha).toBeCloseTo(1, 8);
+    expect(row.posterior_beta).toBeCloseTo(1, 8);
   });
 
   test("bounded window: events older than windowDays are not picked up", async () => {

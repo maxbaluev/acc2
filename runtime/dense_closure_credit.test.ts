@@ -211,6 +211,86 @@ describe("distributeDenseClosureCredit — high residual (failure) → negative 
   });
 });
 
+// TRAJECTORY MOTIF four-link credit leg: a trajectory_motif_predicate row is a
+// first-class SCORED act_artifact. When prompt_composer surfaces it, it emits a
+// retrieval_binding scoped to the directive's task citing the motif id via
+// payload.source_artifact_id. collectContributors reads that binding and the
+// dense pass credits the motif's posterior against the directive's closure
+// residual — closing create → retrieve → mutate → credit on the SAME posterior
+// machinery (applyResidualOutcome), no parallel structure.
+describe("distributeDenseClosureCredit — trajectory motif posterior is credited via its retrieval_binding (four-link)", () => {
+  test("a surfaced motif's posterior_alpha rises on a low-residual (success) closure", () => {
+    const db = openDb(":memory:");
+    const dir = "dir_dense_motif";
+    const { root, childA } = seedDirective(db, dir);
+    // The motif act_artifact (what the trajectory_motif_extractor admits).
+    makeArtifact(db, "motif_3_credit");
+    // prompt_composer surfaced the motif on an INTERMEDIATE task → emitted a
+    // retrieval_binding citing the motif id via source_artifact_id.
+    emitEvent(db, {
+      kind: "retrieval_binding",
+      substrate_origin: "substrate_auto",
+      directive_id: dir,
+      task_id: childA,
+      context_refs: ["motif_3_credit"],
+      payload: {
+        source_artifact_id: "motif_3_credit",
+        binding_surface: "proven_trajectory_motif",
+        section_name: "proven_trajectory_motif",
+        rerank_score: 0.84,
+      },
+    });
+
+    const before = getArtifact(db, "motif_3_credit")!;
+    const res = distributeDenseClosureCredit(db, {
+      closure_audit_event_id: "audit_motif_success",
+      directive_id: dir,
+      root_task_id: root,
+      closure_residual: 0.05, // success
+    });
+    expect(res.ran).toBe(true);
+
+    // The motif's Beta posterior moved: alpha rose (good outcome credited it).
+    const after = getArtifact(db, "motif_3_credit")!;
+    expect(after.posteriorAlpha).toBeGreaterThan(before.posteriorAlpha);
+
+    // An act_artifact_score_updated row attributes the credit to the motif as a
+    // dense_closure_contributor.
+    const updates = denseRows(db, "act_artifact_score_updated");
+    expect(updates.some((p) => p.artifact_id === "motif_3_credit" && p.role === "dense_closure_contributor")).toBe(true);
+  });
+
+  test("a surfaced motif's posterior_beta rises on a high-residual (failure) closure", () => {
+    const db = openDb(":memory:");
+    const dir = "dir_dense_motif_fail";
+    const { root, childA } = seedDirective(db, dir);
+    makeArtifact(db, "motif_3_credit_fail");
+    emitEvent(db, {
+      kind: "retrieval_binding",
+      substrate_origin: "substrate_auto",
+      directive_id: dir,
+      task_id: childA,
+      context_refs: ["motif_3_credit_fail"],
+      payload: {
+        source_artifact_id: "motif_3_credit_fail",
+        binding_surface: "proven_trajectory_motif",
+        section_name: "proven_trajectory_motif",
+      },
+    });
+
+    const before = getArtifact(db, "motif_3_credit_fail")!;
+    const res = distributeDenseClosureCredit(db, {
+      closure_audit_event_id: "audit_motif_fail",
+      directive_id: dir,
+      root_task_id: root,
+      closure_residual: 0.95, // failure
+    });
+    expect(res.ran).toBe(true);
+    const after = getArtifact(db, "motif_3_credit_fail")!;
+    expect(after.posteriorBeta).toBeGreaterThan(before.posteriorBeta);
+  });
+});
+
 // GOAL-SUFFICIENCY (amendment goal_sufficiency_root_commit + ungrounded_provenance_weight):
 // ungrounded / self-reported closure provenance MARKS the dense credit (halves its
 // distributed weight via UNGROUNDED_PROVENANCE_WEIGHT_MULTIPLIER=0.5) but NEVER blocks

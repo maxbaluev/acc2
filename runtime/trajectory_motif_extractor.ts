@@ -27,6 +27,7 @@ import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { emitEvent } from "./events";
 import { poolQuery } from "./sql_pool_singleton";
+import { applyResidualOutcome } from "./artifact_store";
 
 const YIELD_EVERY_N = 25;
 const yieldToEventLoop = (): Promise<void> => new Promise<void>((r) => setTimeout(r, 0));
@@ -115,27 +116,35 @@ const ensureMotifRow = (
 const clamp01 = (n: number): number => (n < 0 ? 0 : n > 1 ? 1 : n);
 
 /**
- * Calibrate a motif row's `score` from its computed avg_closure_residual.
- * A motif whose matching directives close with LOW residual is a GOOD
- * recipe → high score (score = 1 - avg_closure_residual). Also records
- * recent_residual_mean = avg_closure_residual. Idempotent: recomputed
- * each tick from the current evidence, so re-running with the same
- * residual is a no-op write. Only called when residualCount > 0.
+ * Seed a motif row's OUTCOME POSTERIOR from its observed closure correlation.
+ *
+ * A motif is a first-class SCORED object: its `score`/`confidence` are derived
+ * from a Beta(posterior_alpha, posterior_beta) updated by OUTCOME, not from a
+ * direct `score = 1 - avg_closure_residual` overwrite. This reuses the SAME
+ * posterior machinery (`applyResidualOutcome` → `residualToBetaDeltas` →
+ * `recomputeScore`) that every other scored act_artifact uses — no parallel
+ * scoring path. A motif whose matching directives close with LOW residual
+ * accrues alpha (good recipe → high posterior mean); high residual accrues beta.
+ *
+ * Seeding is ONE-SHOT at admission. The per-tick extractor recomputes
+ * avg_closure_residual over the FULL corpus each run, so re-applying it every
+ * tick would double-count evidence into the Beta posterior. Instead the
+ * outcome-informed seed bootstraps the posterior off the flat Beta(1,1)
+ * cold-start; thereafter the four-link credit chain (prompt_composer surfaces
+ * the motif → retrieval_binding → dense_closure_credit calls applyResidualOutcome)
+ * is what accumulates per-retrieval outcome evidence into the SAME posterior.
+ *
+ * Returns true when it applied the seed (created rows only).
  */
-const calibrateMotifScore = (
+const seedMotifPosteriorFromClosure = (
   db: Database,
   id: string,
   avgResidual: number,
 ): void => {
-  const score = clamp01(1 - avgResidual);
-  db.run(
-    `UPDATE act_artifact
-       SET score = ?,
-           recent_residual_mean = ?,
-           updated_at = ?
-     WHERE id = ?`,
-    [score, avgResidual, new Date().toISOString(), id],
-  );
+  // Apply the observed closure residual as a single posterior outcome. score +
+  // confidence are recomputed from the resulting Beta — the posterior is the
+  // single source of truth for ranking.
+  applyResidualOutcome(db, id, clamp01(avgResidual), new Date().toISOString());
 };
 
 export type TrajectoryMotifSummary = {
@@ -316,14 +325,18 @@ export const extractTrajectoryMotifs = async (
     } else {
       summary.motifs_already_present++;
     }
-    // Calibrate the row's score from outcome evidence. Without this the
-    // creation half left every motif stuck at the cold-start 0.5 score
-    // forever — never ranked by whether its matching directives actually
-    // close well. A motif whose matching directives close with LOW
-    // residual is a GOOD recipe → high score. Only calibrate when real
-    // closure evidence exists (residualCount > 0); recomputed each tick.
-    if (avgResidual !== null && residualCount > 0) {
-      calibrateMotifScore(db, id, avgResidual);
+    // Seed the row's OUTCOME POSTERIOR from closure evidence — ONE-SHOT at
+    // admission. Without this the row would sit at the flat Beta(1,1)
+    // cold-start until its first retrieval-credit, never reflecting the closure
+    // correlation already observable at admission time. A motif whose matching
+    // directives close with LOW residual gets a higher posterior mean. We seed
+    // ONLY on creation (created=true): the per-tick recompute walks the full
+    // corpus, so re-applying avgResidual every tick would double-count evidence
+    // into the Beta posterior. After admission, the four-link credit chain
+    // (retrieval_binding → dense_closure_credit → applyResidualOutcome) is what
+    // mutates this same posterior from real per-retrieval outcomes.
+    if (created && avgResidual !== null && residualCount > 0) {
+      seedMotifPosteriorFromClosure(db, id, avgResidual);
       summary.motifs_score_calibrated++;
     }
     // 2026-05-21 noise audit fix: emit ONLY on first observation

@@ -550,6 +550,153 @@ describe("prompt_composer", () => {
     expect(poorComposed.text).not.toContain("PROVEN TRAJECTORY MOTIF");
   });
 
+  // ── Trajectory motif: four-link retrieve leg + cache identity + composition
+  //    with the deliverable groundbase section (no collision) ────────────────
+  const insertScoredMotif = (
+    db: ReturnType<typeof openDb>,
+    id: string,
+    kinds: string[],
+    frequency: number,
+    score: number,
+    avgClosureResidual: number,
+  ): void => {
+    const nowIso = new Date().toISOString();
+    db.run(
+      `INSERT INTO act_artifact (
+         id, runtime, body, declared_sandbox, state_root, kind,
+         posterior_alpha, posterior_beta, score, confidence,
+         recent_residual_mean, recent_kill_count, status, name,
+         fixture_input, fixture_expected_residual, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        "bun",
+        JSON.stringify({ kinds, length: kinds.length, frequency, avg_closure_residual: avgClosureResidual }),
+        JSON.stringify({ runtime: "bun" }),
+        `substrate/trajectory_motif/${id}`,
+        "trajectory_motif_predicate",
+        1.0,
+        1.0,
+        score,
+        0.5,
+        avgClosureResidual,
+        0,
+        "admitted",
+        kinds.join(">"),
+        JSON.stringify({ kinds }),
+        0.5,
+        nowIso,
+        nowIso,
+      ],
+    );
+  };
+
+  const openMotifDirective = (db: ReturnType<typeof openDb>): { directiveId: string; taskId: string } => {
+    const directiveId = newId();
+    const taskId = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: { directive_text: "Ship the embedding-cache compounding lever", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { goal: "Ship the embedding-cache compounding lever", lifecycle: "finite" },
+    });
+    return { directiveId, taskId };
+  };
+
+  test("four-link retrieve leg: surfacing a motif emits a retrieval_binding citing the motif's act_artifact id (so closure credit can move its posterior)", async () => {
+    const db = openDb(":memory:");
+    _resetPromptCacheForTests();
+    seedFoundationalKnowledge(db, { ownerApproved: true });
+    insertScoredMotif(db, "motif_3_bind", ["directive_opened", "task_node_opened", "task_committed"], 11, 0.84, 0.16);
+    const { directiveId, taskId } = openMotifDirective(db);
+
+    const before = (db
+      .query(`SELECT COUNT(*) AS n FROM events WHERE kind = 'retrieval_binding'`)
+      .get() as { n: number }).n;
+    const composed = await composePrompt(db, { taskId });
+    expect(composed.sections.find((s) => s.name === "proven_trajectory_motif")).toBeDefined();
+
+    const bindings = db
+      .query(
+        `SELECT payload, context_refs, directive_id, task_id FROM events
+          WHERE kind = 'retrieval_binding'`,
+      )
+      .all() as Array<{ payload: string; context_refs: string; directive_id: string; task_id: string }>;
+    expect(bindings.length).toBe(before + 1);
+    const b = bindings[bindings.length - 1]!;
+    const payload = JSON.parse(b.payload) as Record<string, unknown>;
+    // The binding cites the motif's act_artifact id via source_artifact_id —
+    // dense_closure_credit.collectContributors reads exactly this field and
+    // credits it via applyResidualOutcome (moves posterior_alpha/beta).
+    expect(payload.source_artifact_id).toBe("motif_3_bind");
+    expect(payload.binding_surface).toBe("proven_trajectory_motif");
+    expect(payload.section_name).toBe("proven_trajectory_motif");
+    expect(JSON.parse(b.context_refs)).toContain("motif_3_bind");
+    expect(b.directive_id).toBe(directiveId);
+    expect(b.task_id).toBe(taskId);
+  });
+
+  test("trajectory motif section COMPOSES WITH the deliverable groundbase section — both present, no collision", async () => {
+    const db = openDb(":memory:");
+    _resetPromptCacheForTests();
+    seedFoundationalKnowledge(db, { ownerApproved: true });
+    insertScoredMotif(db, "motif_3_compose", ["directive_opened", "task_node_opened", "task_committed"], 11, 0.84, 0.16);
+    const { taskId } = openMotifDirective(db);
+
+    const groundbase: import("./prompt_composer").DeliverableGroundbase = {
+      groundbaseArtifactId: "gb_traj",
+      currentBestArtifactId: "deliv_v2",
+      lockedOutlineArtifactId: "outline_traj",
+      requirementsLedgerArtifactId: "reqs_traj",
+      currentBestBody: "Prior-best deliverable body for the compounding lever.",
+      lockedOutline: "1. Intro\n2. Lever\n3. Outcome",
+      requirementsLedger: ["include lever rationale"],
+      satisfiedRequirementIds: ["r1"],
+      lineageArtifactIds: ["deliv_v1", "deliv_v2"],
+      evidenceEventIds: ["ev_gb_traj"],
+    };
+    const composed = await composePrompt(db, { taskId, deliverableGroundbase: groundbase });
+    const names = composed.sections.map((s) => s.name);
+    // Both sections land — the additive trajectory section does not displace or
+    // collide with the load-bearing groundbase floor section.
+    expect(names).toContain("deliverable_groundbase");
+    expect(names).toContain("proven_trajectory_motif");
+    expect(composed.text).toContain("DELIVERABLE GROUNDBASE");
+    expect(composed.text).toContain("PROVEN TRAJECTORY MOTIF");
+    expect(composed.text).toContain("Prior-best deliverable body for the compounding lever.");
+    expect(composed.text).toContain("[cite motif_3_compose]");
+  });
+
+  test("retrieved-motif identity is in the cache signature — a changed surfaced motif is never served stale from cache", async () => {
+    const db = openDb(":memory:");
+    _resetPromptCacheForTests();
+    seedFoundationalKnowledge(db, { ownerApproved: true });
+    // High-scoring motif A is the best recipe → surfaced first.
+    insertScoredMotif(db, "motif_3_A", ["directive_opened", "task_node_opened", "task_committed"], 11, 0.90, 0.10);
+    const { taskId } = openMotifDirective(db);
+
+    const first = await composePrompt(db, { taskId });
+    expect(first.text).toContain("[cite motif_3_A]");
+
+    // The surfaced motif changes: A is removed, a different motif B (same path,
+    // distinct id + score) now wins. If the motif identity were absent from the
+    // cache key, the stale A body would be served for the same (directive,task).
+    db.run(`DELETE FROM act_artifact WHERE id = 'motif_3_A'`);
+    insertScoredMotif(db, "motif_3_B", ["directive_opened", "task_node_opened", "task_committed"], 20, 0.70, 0.30);
+    const second = await composePrompt(db, { taskId });
+    expect(second.text).toContain("[cite motif_3_B]");
+    expect(second.text).not.toContain("[cite motif_3_A]");
+    expect(second.text).not.toBe(first.text);
+  });
+
   test("returns the fixture marker for fixture_d_count_todos prompts", async () => {
     const db = openDb(":memory:");
     const { taskId } = openTask(db);
