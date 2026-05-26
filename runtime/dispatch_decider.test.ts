@@ -526,9 +526,18 @@ describe("dispatch_decider — active strategy ranking (amendment A12ET3SF)", ()
   });
 });
 
-// ── Refinement: task-shape runtime selection (buildRuntimeSelectionEvidence) ──
-describe("dispatch_decider — task-shape runtime selection", () => {
-  test("a python-shaped task text scores uv highest among runtimes", () => {
+// ── Amendment XFCDK2 — runtime selection by scored posterior, NOT regex ──
+//
+// The former keyword/regex lifts (text "python"→uv, "browser"→camofox) are
+// removed: the project contract forbids regex for language understanding.
+// Runtime choice is now driven by artifact posterior, recent action_scored
+// outcomes, runtime availability, and STRUCTURAL `runtime:<x>:` target
+// resources only. These tests pin the new scored behavior and replace the two
+// prior tests (`a python-shaped task text scores uv highest` /
+// `a browser-shaped task text scores camofox-browser highest`) that asserted
+// the old keyword-regex routing this amendment deletes.
+describe("dispatch_decider — runtime selection by scored posterior (amendment XFCDK2)", () => {
+  test("free-text keywords alone do NOT force-route a runtime (no regex language matching)", () => {
     const db = openDb(":memory:");
     runViews(db);
     emitEvent(db, {
@@ -543,29 +552,74 @@ describe("dispatch_decider — task-shape runtime selection", () => {
     } as Partial<TaskNode>));
     const rs = decision.runtime_selection;
     expect(rs).toBeDefined();
-    expect(rs!.selected_runtime).toBe("uv");
-    expect(rs!.candidate_scores.uv).toBeGreaterThan(rs!.candidate_scores.bun ?? 0);
-    expect(rs!.candidate_scores.uv).toBeGreaterThan(rs!.candidate_scores["camofox-browser"] ?? 0);
+    // With no artifact posterior, no outcomes, and no runtime: target, the
+    // word "python" does NOT lift uv above the neutral baseline — every
+    // candidate stays tied. The OLD regex would have forced uv > bun here.
+    expect(rs!.candidate_scores.uv).toBeCloseTo(rs!.candidate_scores.bun ?? 0, 5);
+    expect(rs!.candidate_scores.uv).toBeCloseTo(rs!.candidate_scores["camofox-browser"] ?? 0, 5);
   });
 
-  test("a browser-shaped task text scores camofox-browser highest among runtimes", () => {
+  test("a 'python'-mentioning task is NOT force-routed when posterior/availability favor another runtime", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    // Admit a high-posterior bun artifact AND mark uv unavailable. The scored
+    // path must pick bun even though the text screams "python/pandas/numpy".
+    emitEvent(db, {
+      kind: "runtime_self_diagnostic_recorded",
+      substrate_origin: "substrate_auto",
+      payload: { runtime: "uv", fault_kind: "runtime_unavailable" },
+    });
+    db.run(
+      `INSERT INTO act_artifact (
+         id, runtime, body, declared_sandbox, state_root,
+         posterior_alpha, posterior_beta, score, confidence,
+         recent_residual_mean, recent_kill_count, status, name,
+         fixture_input, fixture_expected_residual, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "art_bun_high", "bun", "// stub",
+        JSON.stringify({ runtime: "bun", cpu_ms: 1000, wall_ms: 1000, memory_mb: 64 }),
+        "state/x", 1, 1, 0.97, 0.95, 0, 0, "promoted", "bun runner",
+        "{}", 0, "2026-05-26T00:00:00Z", "2026-05-26T00:00:00Z",
+      ],
+    );
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: "d_py2",
+      payload: { directive_text: "Load the CSV with pandas and run a numpy regression in python", lifecycle: "finite" },
+    });
+    const decision = decideDispatch(db, sampleTask({
+      directive_id: "d_py2",
+      goal: "analyze data with pandas numpy in python",
+    } as Partial<TaskNode>));
+    const rs = decision.runtime_selection;
+    expect(rs).toBeDefined();
+    // Posterior (bun=0.97) + availability penalty on uv decide the winner —
+    // the "python" keyword does not override the scored evidence.
+    expect(rs!.selected_runtime).toBe("bun");
+    expect(rs!.candidate_scores.bun).toBeGreaterThan(rs!.candidate_scores.uv ?? 0);
+  });
+
+  test("a structural runtime: target resource (not free text) deterministically lifts its runtime", () => {
     const db = openDb(":memory:");
     runViews(db);
     emitEvent(db, {
       kind: "directive_opened",
       substrate_origin: "owner",
-      directive_id: "d_browser",
-      payload: { directive_text: "Navigate to the url and scrape the web page, click through the chromium DOM", lifecycle: "finite" },
+      directive_id: "d_struct",
+      payload: { directive_text: "do the thing", lifecycle: "finite" },
     });
     const decision = decideDispatch(db, sampleTask({
-      directive_id: "d_browser",
-      goal: "scrape and navigate the browser web page url",
+      directive_id: "d_struct",
+      goal: "run the analysis",
+      target_resources: ["runtime:python:analysis.py"],
     } as Partial<TaskNode>));
     const rs = decision.runtime_selection;
     expect(rs).toBeDefined();
-    expect(rs!.selected_runtime).toBe("camofox-browser");
-    expect(rs!.candidate_scores["camofox-browser"]).toBeGreaterThan(rs!.candidate_scores.bun ?? 0);
-    expect(rs!.candidate_scores["camofox-browser"]).toBeGreaterThan(rs!.candidate_scores.uv ?? 0);
+    // The structural scheme (runtime:python:) — NOT a regex on prose — lifts uv.
+    expect(rs!.selected_runtime).toBe("uv");
+    expect(rs!.candidate_scores.uv).toBeGreaterThan(rs!.candidate_scores.bun ?? 0);
   });
 });
 
