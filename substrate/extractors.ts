@@ -108,6 +108,17 @@ const EXTRACTOR_YIELD_INTERVAL = 25;
  *  LIMIT alone plus the per-row idempotency check. */
 const EXTRACTOR_SCAN_LIMIT = 5000;
 
+/** LIVENESS (X5AF768V): hard ceiling on verdict rows pulled by the
+ *  synchronous hot-path `maybePromoteKnowledge` recompute. The SQL
+ *  predicate already filters to verdicts that cite the one candidate, so
+ *  a healthy candidate sees a handful of rows; this LIMIT is the
+ *  fail-closed backstop guaranteeing the hot path can NEVER materialise
+ *  an unbounded scan into the event loop even under a pathological
+ *  citation fan-out. Promotion needs only countThreshold (5) wins, so a
+ *  1000-row bound is far above any decision boundary while staying O(1)
+ *  for the loop. */
+const HOT_PATH_VERDICT_SCAN_LIMIT = 1000;
+
 const readMeta = (db: Database, key: string): string | null => {
   const row = db.query("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | null;
   return row?.value ?? null;
@@ -772,12 +783,35 @@ export const maybePromoteKnowledge = (db: Database, candidateId: string): Knowle
   // read; mirror it here so synchronous promotion (called after every
   // distributeCredit knowledge emit) doesn't promote on sustained
   // retrieval alone unless ~50 bindings have accumulated.
+  // LIVENESS (X5AF768V): the closure-credit hot path (runtime/credit.ts:
+  // distributeCredit → maybePromoteKnowledge, called once per cited
+  // knowledge id on EVERY scored act) previously ran an UNBOUNDED
+  // synchronous `SELECT … FROM events WHERE kind IN (…)` with no
+  // candidate filter, no LIMIT, and no cursor — materialising the entire
+  // verdict history (hundreds of thousands of rows on a mature ledger)
+  // into JS and then JSON.parsing every context_refs to test membership.
+  // On a long-running daemon this single sync scan blocked the Bun event
+  // loop for tens of seconds and was a direct contributor to the 88-min
+  // wedge. The fix pushes the candidate filter INTO SQLite so only the
+  // handful of verdict rows that actually cite `candidateId` cross into
+  // JS, and bounds the result with a LIMIT so a pathological fan-out can
+  // never re-introduce an unbounded scan on the hot path. Both predicate
+  // legs are required to preserve the prior semantics exactly: the
+  // primary distributeCredit emit and the bind_citation emit both stamp
+  // `payload.knowledge_id`, while the semantic-dedup corroboration path
+  // cites the candidate only through context_refs — the LIKE leg keeps
+  // those wins counted. The trailing `refs.includes(candidateId)` check
+  // is retained as an exact-match guard against LIKE substring collisions.
   const verdicts = db
     .query(
       `SELECT kind, context_refs, payload FROM events
-       WHERE kind IN ('candidate_confirmed', 'candidate_contradicted')`,
+       WHERE kind IN ('candidate_confirmed', 'candidate_contradicted')
+         AND (json_extract(payload, '$.knowledge_id') = ?1
+              OR context_refs LIKE '%"' || ?1 || '"%')
+       ORDER BY ts DESC
+       LIMIT ?2`,
     )
-    .all() as Array<{ kind: string; context_refs: string; payload: string }>;
+    .all(candidateId, HOT_PATH_VERDICT_SCAN_LIMIT) as Array<{ kind: string; context_refs: string; payload: string }>;
   let wins = 0;
   let losses = 0;
   for (const v of verdicts) {

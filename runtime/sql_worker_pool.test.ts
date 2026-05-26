@@ -96,6 +96,35 @@ describe("SqlWorkerPool", () => {
     expect(pool.metrics().completed).toBeGreaterThanOrEqual(2);
   });
 
+  test("LIVENESS (EKTPHEYP): least-loaded-ready dispatch spreads concurrent reads across workers and never parks a job behind a busy one", async () => {
+    pool = startSqlWorkerPool({ workerCount: 4, dbPath, taskQueueLimit: 256 });
+    // Warm up so all 4 worker threads have posted their "ready" message;
+    // pickWorker only routes to ready workers (boot/respawn window falls
+    // back to round-robin). A sequence of probes lets every thread report.
+    await Promise.all(Array.from({ length: 8 }, () => pool!.query("SELECT 1 AS x")));
+
+    // Fire a burst of concurrent reads. With blind round-robin a burst can
+    // pile onto one thread while siblings sit idle; least-loaded dispatch
+    // keeps the in-flight load balanced. The decisive property we assert is
+    // CORRECTNESS under concurrency (every job resolves with the right row)
+    // plus observed concurrency > 1 (work genuinely spread, not serialized
+    // behind one worker).
+    const peakActive: number[] = [];
+    const observer = setInterval(() => peakActive.push(pool!.metrics().active), 1);
+    const results = await Promise.all(
+      Array.from({ length: 32 }, () => pool!.query<{ c: number }>("SELECT COUNT(*) AS c FROM items")),
+    );
+    clearInterval(observer);
+
+    // Every concurrent job returned the correct, identical result — no job
+    // was lost or mis-routed by the new picker.
+    expect(results.every((r) => r[0]?.c === 200)).toBe(true);
+    expect(pool.metrics().completed).toBeGreaterThanOrEqual(32 + 8);
+    // The burst was genuinely concurrent across workers (not all serialized
+    // onto a single thread), so peak in-flight exceeded 1 at some sample.
+    expect(Math.max(0, ...peakActive)).toBeGreaterThan(1);
+  });
+
   test("backpressure: rejects with pool_queue_overflow when limit exceeded", async () => {
     pool = startSqlWorkerPool({ workerCount: 1, dbPath, taskQueueLimit: 2 });
     // Fire 3 queries; the first two enter flight + queue, the third

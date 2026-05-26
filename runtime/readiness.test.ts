@@ -114,3 +114,69 @@ describe("readiness — Tier D D1 in-flight stuck detection", () => {
     // (no recordWorkerTick was called, so stuckWorkers logic is unaffected)
   });
 });
+
+// LIVENESS (472WP33K / Z57SKME7): the /ready gate and /health status now
+// fail closed when a worker tick is wedged in-flight, so the autonomous
+// loop self-protects instead of feeding a wedged daemon. The HTTP routes
+// live in runtime/daemon.ts; here we prove the exact gating predicate they
+// compose — `isReady() && inFlightStuckWorkers().length === 0` for /ready,
+// and the degraded predicate for /health — directly against the in-memory
+// state machine, including the critical liveness≠slowness property.
+describe("readiness — in-flight stuck worker gates /ready and /health", () => {
+  beforeEach(() => { resetReadiness(); });
+  afterEach(() => { resetReadiness(); });
+
+  // mirrors daemon.ts /ready and /health status computation
+  const readyGate = (now: number): boolean =>
+    isReady() && inFlightStuckWorkers(60_000, now).length === 0;
+  const healthStatus = (now: number): "ok" | "degraded" =>
+    stuckWorkers(now).length === 0 && inFlightStuckWorkers(60_000, now).length === 0
+      ? "ok"
+      : "degraded";
+
+  test("ready when all workers are ready and none wedged in-flight", () => {
+    const now = Date.now();
+    registerWorker("extractors", 30_000);
+    markWorkerReady("extractors");
+    recordWorkerTickStart("extractors", now - 5_000); // 5s tick — healthy
+    expect(readyGate(now)).toBe(true);
+    expect(healthStatus(now)).toBe("ok");
+  });
+
+  test("NOT ready (503) and degraded when a worker tick is wedged in-flight", () => {
+    const now = Date.now();
+    registerWorker("extractors", 30_000);
+    markWorkerReady("extractors");
+    // A worker tick (e.g. the pre-fix unbounded closure-credit scan) that
+    // started 90s ago and never completed — the event-loop wedge signal.
+    recordWorkerTickStart("extractors", now - 90_000);
+    expect(isReady()).toBe(true);             // startup completed…
+    expect(readyGate(now)).toBe(false);       // …but /ready still fails closed
+    expect(inFlightStuckWorkers(60_000, now).map((s) => s.worker)).toContain("extractors");
+    expect(healthStatus(now)).toBe("degraded");
+  });
+
+  test("liveness ≠ slowness: a long-running brain dispatch is NOT a supervised tick and never trips the gate", () => {
+    const now = Date.now();
+    registerWorker("extractors", 30_000);
+    markWorkerReady("extractors");
+    // Brain dispatches run through the bridge / task_dispatcher, NOT through
+    // supervisedTick, so they never call recordWorkerTickStart and never
+    // appear in state.tickStartedMs. Even a brain cycle running for 10
+    // minutes leaves the in-flight stuck set empty → daemon stays ready.
+    expect(inFlightStuckWorkers(60_000, now + 600_000)).toEqual([]);
+    expect(readyGate(now)).toBe(true);
+    expect(healthStatus(now)).toBe("ok");
+  });
+
+  test("recovery: ready/ok again once the wedged tick completes", () => {
+    const now = Date.now();
+    registerWorker("extractors", 30_000);
+    markWorkerReady("extractors");
+    recordWorkerTickStart("extractors", now - 90_000);
+    expect(readyGate(now)).toBe(false);
+    recordWorkerTick("extractors", now); // tick finally completes
+    expect(readyGate(now)).toBe(true);
+    expect(healthStatus(now)).toBe("ok");
+  });
+});
