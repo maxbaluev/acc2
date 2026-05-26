@@ -509,17 +509,23 @@ const buildRuntimeSelectionEvidence = (db: Database, task: TaskNode, text: strin
     if (ref.startsWith("runtime:browser:") || ref.startsWith("browser_session:")) structural["camofox-browser"] = Math.max(structural["camofox-browser"] ?? 0, 0.95);
   }
 
-  const normalized = text.toLowerCase();
-  const addShape = (runtime: string, score: number): void => {
-    runtimes.add(runtime);
-    taskShape[runtime] = Math.max(taskShape[runtime] ?? 0.34, clamp01(score));
-  };
-  // Task-shape evidence is soft residual evidence, not a routing gate: words can
-  // lift a runtime, but artifact posterior/outcomes and availability still blend.
-  if (/\b(python|py|uv|pip|pandas|numpy|scipy|sklearn|scikit|pytorch|torch|tensorflow|pil|opencv|jupyter|notebook|dataframe|csv|parquet|machine learning|\bml\b)\b/.test(normalized)) addShape("uv", 0.88);
-  if (/\b(browser|browse|scrape|crawl|navigate|click|chromium|web page|webpage|url|http|https|dom|screenshot|camofox)\b/.test(normalized)) addShape("camofox-browser", 0.86);
-  if (/\b(typescript|javascript|bun|node|tsx|ts\b|js\b|cli|repo|sqlite|http api|json|markdown|regex|text)\b/.test(normalized)) addShape("bun", 0.72);
-  if (!/\b(python|pandas|numpy|browser|scrape|navigate|url|chromium|camofox)\b/.test(normalized)) addShape("bun", 0.58);
+  void text;
+  // Runtime choice is a scored strategy-selection problem, not a second regex
+  // classifier on natural language. The project contract forbids regex for
+  // language understanding, so the former keyword lifts (python→uv, browser→
+  // camofox, …) are removed. The deterministic task-shape signal that survives
+  // is STRUCTURAL ONLY: declared `runtime:<x>:` / `browser_session:` target
+  // resources (already folded into `structural` above) name a runtime
+  // unambiguously without interpreting free text. Everything else is decided
+  // by artifact posterior, recent action_scored outcomes, and availability —
+  // the same scored machinery dispatch_strategy_ranker uses for routing.
+  //
+  // taskShape therefore inherits the structural scheme evidence (so an
+  // explicit runtime: target still lifts its runtime) and otherwise stays at
+  // the neutral baseline, letting posterior/outcome/availability break ties.
+  for (const runtime of runtimes) {
+    taskShape[runtime] = Math.max(taskShape[runtime] ?? 0.34, structural[runtime] ?? 0.34);
+  }
 
   try {
     const rows = db.query(`SELECT residual, payload FROM events WHERE kind = 'action_scored' AND residual IS NOT NULL ORDER BY ts DESC, rowid DESC LIMIT 200`).all() as Array<{ residual: number | null; payload: string | null }>;
