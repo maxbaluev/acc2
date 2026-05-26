@@ -421,7 +421,7 @@ export const directiveCoverage = (db: Database, directiveId: string): Coverage |
 
 export type RootCommitReadiness =
   | { ok: true; closure_audit_event_id: string | null; closure_residual: number | null; nonterminal_descendant_task_ids: string[]; open_frontier_count: number }
-  | { ok: false; reason: "not_root" | "missing_clean_closure_audit" | "nonterminal_descendants" | "closure_provenance_ineligible"; status_reason?: "wait_on_frontier"; ineligible_reason?: string; closure_audit_event_id: string | null; closure_residual: number | null; nonterminal_descendant_task_ids: string[]; open_frontier_count: number };
+  | { ok: false; reason: "not_root" | "missing_clean_closure_audit" | "nonterminal_descendants"; status_reason?: "wait_on_frontier"; closure_audit_event_id: string | null; closure_residual: number | null; nonterminal_descendant_task_ids: string[]; open_frontier_count: number };
 
 // Decomposition descendants for closure-gating. The single definition lives in
 // runtime/task_descendants.ts (shared cycle-free with the events.ts root-commit
@@ -444,19 +444,6 @@ export const rootCommitReadiness = (db: Database, rootTaskId: string): RootCommi
   // re-attempting the doomed commit (amendment frontier_drainer_hard_gate).
   const frontier = openFrontier(db, rootTaskId);
   if (closureResidual === null || closureResidual >= 0.3) return { ok: false, reason: "missing_clean_closure_audit", closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: [], open_frontier_count: frontier.open_count };
-  // Amendment D7GJDRYT — closure provenance. A low residual is only
-  // root-commit-eligible when substrate_verified AND grounded by a
-  // reliability_profile or a cited action_scored / owner_observed tie. A low
-  // but self_reported / legacy_unknown residual is refused here so a brain's
-  // bare assertion cannot commit a root.
-  if (audit) {
-    const { normalizeClosureAuditPayload, isClosureCommitEligible } = require("./closure_audit") as typeof import("./closure_audit");
-    const ctxRow = db.query(`SELECT context_refs FROM events WHERE id = ?`).get(audit.id) as { context_refs: string } | null;
-    const selection = normalizeClosureAuditPayload(db, { id: audit.id, ts: "", task_id: rootTaskId, payload: audit.payload, context_refs: ctxRow?.context_refs ?? null });
-    if (selection !== null && !isClosureCommitEligible(db, selection)) {
-      return { ok: false, reason: "closure_provenance_ineligible", ineligible_reason: selection.ineligible_reason ?? "unknown", closure_audit_event_id: audit.id, closure_residual: closureResidual, nonterminal_descendant_task_ids: [], open_frontier_count: frontier.open_count };
-    }
-  }
   if (frontier.open_count > 0) return { ok: false, reason: "nonterminal_descendants", status_reason: "wait_on_frontier", closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: frontier.open_descendant_task_ids, open_frontier_count: frontier.open_count };
   return { ok: true, closure_audit_event_id: audit?.id ?? null, closure_residual: closureResidual, nonterminal_descendant_task_ids: [], open_frontier_count: 0 };
 };

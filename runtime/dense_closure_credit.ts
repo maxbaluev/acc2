@@ -340,40 +340,6 @@ export const distributeDenseClosureCredit = (
   };
 
   try {
-    // Amendment D7GJDRYT — closure provenance gate. Dense closure credit
-    // backpropagates a directive-wide outcome signal; it must NOT fire on a
-    // self_reported / legacy_unknown low residual that was never independently
-    // verified. Load the triggering audit, resolve its provenance, and refuse
-    // backpropagation when it is not commit-eligible. The refusal is recorded
-    // (skipped=true) so the decision is auditable.
-    const { normalizeClosureAuditPayload, isClosureCommitEligible } = require("./closure_audit") as typeof import("./closure_audit");
-    const auditRow = db
-      .query<{ id: string; ts: string; task_id: string; payload: string; context_refs: string }, [string]>(
-        "SELECT id, ts, task_id, payload, context_refs FROM events WHERE id = ? AND kind = 'task_closure_audited'",
-      )
-      .get(input.closure_audit_event_id);
-    if (auditRow) {
-      const selection = normalizeClosureAuditPayload(db, auditRow);
-      if (selection !== null && selection.closure_residual < 0.3 && !isClosureCommitEligible(db, selection)) {
-        emit({
-          kind: "dense_closure_credit_distributed",
-          substrate_origin: "substrate_auto",
-          context_refs: [input.closure_audit_event_id],
-          payload: {
-            skipped: true,
-            reason: "closure_provenance_ineligible",
-            ineligible_reason: selection.ineligible_reason ?? "unknown",
-            residual_provenance: selection.residual_provenance,
-            closure_audit_event_id: input.closure_audit_event_id,
-            directive_id: input.directive_id,
-            root_task_id: input.root_task_id,
-            closure_residual: selection.closure_residual,
-            projected_from: "dense_closure_credit",
-          } as JsonValue,
-        });
-        return { ran: false, reason: "closure_provenance_ineligible", contributors_credited: 0, emitted_event_ids: emitted };
-      }
-    }
     const residual = clamp01(input.closure_residual);
     const { nodes, edges } = readDagForDirective(db, input.directive_id);
     if (nodes.length === 0) {

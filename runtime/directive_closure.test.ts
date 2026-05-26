@@ -231,7 +231,7 @@ describe("directive_closure", () => {
     for (const id of [childA, childB]) { emitEvent(db, { kind: "task_node_opened", substrate_origin: "owner", directive_id: directiveId, task_id: id, parent_task_id: rootTaskId, payload: { goal: `child ${id}` } }); emitEvent(db, { kind: "task_edge_recorded", substrate_origin: "owner", directive_id: directiveId, task_id: rootTaskId, payload: { kind: "refines", from_task: rootTaskId, to_task: id } }); }
     expect(descendantTaskIds(db, rootTaskId).sort()).toEqual([childA, childB].sort());
     expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: false, reason: "missing_clean_closure_audit" });
-    emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.12, payload: { closure_residual: 0.12, residual_provenance: "substrate_verified", reliability_profile: { verified: true } } });
+    emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.12, payload: { closure_residual: 0.12 } });
     expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: false, reason: "nonterminal_descendants", nonterminal_descendant_task_ids: expect.arrayContaining([childA, childB]) });
     for (const id of [childA, childB]) emitEvent(db, { kind: "task_committed", substrate_origin: "brain", directive_id: directiveId, task_id: id, payload: { summary: "child done" } });
     expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: true, closure_residual: 0.12 });
@@ -251,7 +251,7 @@ describe("directive_closure", () => {
     expect(f.open_descendant_task_ids.sort()).toEqual([childA, childB].sort());
 
     // Clean closure but open frontier → wait_on_frontier, root NOT ok.
-    emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.1, payload: { closure_residual: 0.1, residual_provenance: "substrate_verified", reliability_profile: { verified: true } } });
+    emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.1, payload: { closure_residual: 0.1 } });
     expect(rootCommitReadiness(db, rootTaskId)).toMatchObject({ ok: false, reason: "nonterminal_descendants", status_reason: "wait_on_frontier", open_frontier_count: 2 });
 
     // Drain one descendant → frontier shrinks, root still parked.
@@ -326,7 +326,7 @@ describe("directive_closure", () => {
       directive_id: directiveId,
       task_id: rootId,
       residual: 0.1,
-      payload: { closure_residual: 0.1, residual_provenance: "substrate_verified", reliability_profile: { verified: true } },
+      payload: { closure_residual: 0.1 },
     });
 
     // Commit childB — parent should now cascade because closure audit is clean.
@@ -388,7 +388,7 @@ describe("directive_closure", () => {
       directive_id: directiveId,
       task_id: rootId,
       residual: 0.1,
-      payload: { closure_residual: 0.1, residual_provenance: "substrate_verified", reliability_profile: { verified: true } },
+      payload: { closure_residual: 0.1 },
     });
     emitEvent(db, {
       kind: "task_committed",
@@ -454,7 +454,7 @@ describe("coverage_invariant_hard_gate", () => {
   // A root with descendants may only commit after a clean closure audit (the
   // existing events.ts root-commit gate), so realistic fixtures audit then commit.
   const commitRoot = (db: ReturnType<typeof openDb>, directiveId: string, rootTaskId: string) => {
-    emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.12, payload: { closure_residual: 0.12, residual_provenance: "substrate_verified", reliability_profile: { verified: true } } });
+    emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.12, payload: { closure_residual: 0.12 } });
     emitEvent(db, { kind: "task_committed", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, payload: {} });
     markNoNewLesson(db, directiveId, rootTaskId);
   };
@@ -539,7 +539,7 @@ describe("lesson_coverage_hard_gate", () => {
   const commitBare = (db: ReturnType<typeof openDb>, directiveId: string, taskId: string) =>
     emitEvent(db, { kind: "task_committed", substrate_origin: "brain", directive_id: directiveId, task_id: taskId, payload: {} });
   const commitRootBare = (db: ReturnType<typeof openDb>, directiveId: string, rootTaskId: string) => {
-    emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.12, payload: { closure_residual: 0.12, residual_provenance: "substrate_verified", reliability_profile: { verified: true } } });
+    emitEvent(db, { kind: "task_closure_audited", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, residual: 0.12, payload: { closure_residual: 0.12 } });
     emitEvent(db, { kind: "task_committed", substrate_origin: "brain", directive_id: directiveId, task_id: rootTaskId, payload: {} });
   };
 

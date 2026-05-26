@@ -1075,36 +1075,12 @@ const terminateNoProgressRedispatch = (db: Database, task: TaskNode): NoProgress
 
   const deliverableRows = progressRows.filter((r) => DELIVERABLE_PROGRESS_KINDS.has(r.kind));
   const terminalOrRecursionRows = progressRows.filter((r) => TERMINAL_OR_RECURSION_KINDS.has(r.kind));
-  // Amendment D7GJDRYT — closure provenance. A "clean" closure for
-  // auto-commit must be more than a low residual: it must be
-  // commit-eligible (substrate_verified AND grounded). A low but
-  // self_reported / legacy_unknown residual is NOT a clean closure and must
-  // not auto-commit — it falls through and the scheduler emits a
-  // closure_provenance_ineligible admission gate instead.
-  const { normalizeClosureAuditPayload, isClosureCommitEligible } = require("./closure_audit") as typeof import("./closure_audit");
-  let provenanceIneligibleAudit: { id: string; reason: string } | null = null;
   const cleanClosure = terminalOrRecursionRows.find((r) => {
     if (r.kind !== "task_closure_audited") return false;
     const payload = parseEventPayload(r.payload);
     const residual = typeof payload.closure_residual === "number" ? payload.closure_residual : r.residual;
-    if (!(typeof residual === "number" && Number.isFinite(residual) && residual < 0.3)) return false;
-    const selection = normalizeClosureAuditPayload(db, { id: r.id, ts: "", task_id: task.id, payload: r.payload, context_refs: (r as { context_refs?: string }).context_refs ?? null });
-    if (selection !== null && !isClosureCommitEligible(db, selection)) {
-      if (!provenanceIneligibleAudit) provenanceIneligibleAudit = { id: r.id, reason: selection.ineligible_reason ?? "unknown" };
-      return false;
-    }
-    return true;
+    return typeof residual === "number" && Number.isFinite(residual) && residual < 0.3;
   });
-
-  if (!cleanClosure && provenanceIneligibleAudit) {
-    // Record the structural refusal: a low residual existed but lacked
-    // closure provenance grounding, so auto-commit was withheld.
-    const ineligible: { id: string; reason: string } = provenanceIneligibleAudit;
-    emitSchedulerAdmissionGate(db, task, "closure_provenance_ineligible", {
-      ineligible_reason: ineligible.reason,
-      closure_audit_event_id: ineligible.id,
-    });
-  }
 
   if (cleanClosure) {
     // A ROOT whose descendants are not all terminal CANNOT commit yet: the

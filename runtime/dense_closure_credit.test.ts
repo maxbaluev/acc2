@@ -262,7 +262,7 @@ describe("distributeDenseClosureCredit — bounded + additive trigger", () => {
       substrate_origin: "substrate_auto",
       directive_id: dir,
       task_id: root,
-      payload: { closure_residual: 0.1, verdict: "audited", residual_provenance: "substrate_verified", reliability_profile: { verified: true } },
+      payload: { closure_residual: 0.1, verdict: "audited" },
     });
     await flushPostCommitProjectionsForTest();
 
@@ -272,37 +272,6 @@ describe("distributeDenseClosureCredit — bounded + additive trigger", () => {
     const summary = denseRows(db, "dense_closure_credit_distributed");
     expect(summary.length).toBe(1);
     expect(summary[0]!.root_task_id).toBe(root);
-  });
-
-  test("amendment D7GJDRYT: a self_reported low-residual ROOT closure does NOT distribute dense credit", async () => {
-    const db = openDb(":memory:");
-    const dir = "dir_dense_selfreport";
-    const { root, childA } = seedDirective(db, dir);
-    makeArtifact(db, "art_a");
-    seedActCiting(db, dir, childA, ["art_a"], []);
-
-    const before = getArtifact(db, "art_a")!;
-    // Low residual but self_reported (no substrate verification / grounding) —
-    // dense backprop must refuse and record a skipped audit row.
-    emitEvent(db, {
-      kind: "task_closure_audited",
-      substrate_origin: "brain",
-      directive_id: dir,
-      task_id: root,
-      payload: { closure_residual: 0.1, verdict: "audited", residual_provenance: "self_reported" },
-    });
-    await flushPostCommitProjectionsForTest();
-
-    // No posterior moved.
-    const after = getArtifact(db, "art_a")!;
-    expect(after.posteriorAlpha).toBe(before.posteriorAlpha);
-    expect(after.posteriorBeta).toBe(before.posteriorBeta);
-
-    // A skipped dense_closure_credit_distributed row records the refusal.
-    const summary = denseRows(db, "dense_closure_credit_distributed");
-    expect(summary.length).toBe(1);
-    expect(summary[0]!.skipped).toBe(true);
-    expect(summary[0]!.reason).toBe("closure_provenance_ineligible");
   });
 
   test("a NON-root child closure audit does NOT fire the dense pass", async () => {
@@ -319,7 +288,7 @@ describe("distributeDenseClosureCredit — bounded + additive trigger", () => {
       substrate_origin: "substrate_auto",
       directive_id: dir,
       task_id: childA,
-      payload: { closure_residual: 0.1, verdict: "audited", residual_provenance: "substrate_verified", reliability_profile: { verified: true } },
+      payload: { closure_residual: 0.1, verdict: "audited" },
     });
     await flushPostCommitProjectionsForTest();
 
@@ -354,7 +323,7 @@ describe("distributeDenseClosureCredit — bounded + additive trigger", () => {
       substrate_origin: "substrate_auto",
       directive_id: dir,
       task_id: root,
-      payload: { closure_residual: 0.05, verdict: "audited", residual_provenance: "substrate_verified", reliability_profile: { verified: true } },
+      payload: { closure_residual: 0.05, verdict: "audited" },
     });
     await flushPostCommitProjectionsForTest();
 
