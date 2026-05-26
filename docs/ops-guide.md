@@ -170,17 +170,17 @@ The legacy per-worker env vars (`ACC2_EMBEDDER_AUTOSTART`, `ACC2_OWNER_AUTONOMY_
 ## 5. Updating
 
 ```bash
-cd bos2 && git pull
-cd system/acc2 && bun install            # picks up dep changes
-bun cli/dispatch.ts daemon stop          # auth-gated; admin token from ~/.accint/v2.sock.token
-# Wait for /health to stop responding, then:
-bun cli/dispatch.ts daemon start         # detached restart
-# OR if running under systemd / launchd:
-#   systemctl --user restart accint
-#   launchctl unload ~/Library/LaunchAgents/com.accint.daemon.plist && launchctl load <same path>
-bun cli/dispatch.ts doctor               # confirm the new build came up cleanly
-bun cli/dispatch.ts version              # prints the source version + the commit the daemon loaded
+cd system/acc2
+# Signed release/update path: verifies the manifest signature, stages + hashes
+# every file, runs the min-version gate, applies migrations, restarts the
+# daemon, and rolls back if post-update health fails. The release is a signed
+# IPFS bundle — git-pull is NOT the update mechanism.
+bun cli/dispatch.ts update --yes --source ipfs-cid --cid <RELEASE_CID>
+bun cli/dispatch.ts doctor                # confirm the new build came up cleanly
+bun cli/dispatch.ts version               # prints the source version + the commit the daemon loaded
 ```
+
+Manual git-pull/restart remains a developer recovery path only; operator docs must teach the signed update surface as canonical.
 
 `acc version` is the canonical post-update check: it prints the shipped semver (from `package.json`) AND the running daemon's `loaded_git_head`. After a `git pull` the source tree is at the new commit but the daemon is still serving the old one until you restart — `acc version` makes that divergence visible. Once `loaded_git_head` matches `git rev-parse HEAD`, the restart picked up the new build.
 
@@ -196,7 +196,7 @@ External dependencies evolve independently of acc2. The brain subprocess (openco
 | **camoufox** | `ls ~/.cache/camoufox/camoufox` or `$CAMOUFOX_BINARY_PATH` | `python -m camoufox fetch` — refreshes the bundled Firefox build. The Python package itself comes from `pip install -U camoufox` or `uv pip install -U camoufox`. |
 | **uv** (Astral) | `uv --version` | `uv self update` — Astral provides built-in self-update. |
 | **bun** | `bun --version` | `bun upgrade` — upgrades the bun runtime in-place. |
-| **AccInt v2** | `git -C bos2 log -1` | `git pull && bun install` (see the block above), then restart the daemon. |
+| **AccInt v2** | `bun cli/dispatch.ts version` | `bun cli/dispatch.ts update --yes --source ipfs-cid --cid <RELEASE_CID>` (signed release path; see §5). Manual `git pull && bun install` + daemon restart is a developer recovery path only, not the canonical operator update. |
 
 `bun cli/admin.ts upgrade-check` queries every external subsystem and renders a one-line summary per row so you can see at a glance which need attention. For opencode it ALSO compares the installed version against the GitHub `releases/latest` tag (cached 1h at `~/.accint/state/cache/opencode-latest.json`; set `GITHUB_TOKEN` if you hit the 60 req/h anonymous rate limit).
 

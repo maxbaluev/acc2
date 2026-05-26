@@ -50,7 +50,7 @@ acc init --yes                       # state dir, admin token, knowledge + artif
 acc doctor                           # composite readiness — must be PASS
 acc daemon start                     # all workers ON by default
 acc version                          # source/daemon/schema/tool snapshot
-acc update --yes                     # future safe self-update path
+acc update --yes --source ipfs-cid --cid <RELEASE_CID>  # signed release self-update path
 acc task "your first goal"           # the loop begins
 acc watch                            # live TUI in another terminal
 ```
@@ -86,7 +86,7 @@ What each step does:
 
 ### Updating an existing operator install
 
-Use `acc update --yes` from the repo root. It takes a pre-update health snapshot, pulls with `git pull --ff-only`, applies pending migrations, restarts the daemon, verifies post-update health, and rolls the source tree back to the previous commit if post-health fails.
+Use `acc update --yes --source ipfs-cid --cid <RELEASE_CID>` from the repo root. It takes a pre-update health snapshot, fetches and verifies the signed IPFS release manifest, stages + hashes every file, runs the min-version compatibility gate, applies pending migrations, restarts the daemon, verifies post-update health, and rolls the source tree back to the previous commit if post-health fails. (The update is a signed release bundle, not a `git pull`; manual git-pull/restart is a developer recovery path only.)
 
 The rest of this guide explains each host dependency in detail. Use it
 when one of the six steps above reports an issue, or when you want the
