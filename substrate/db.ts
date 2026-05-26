@@ -67,18 +67,22 @@ const applyWalPragmas = (db: Database): void => {
   }
   db.run("PRAGMA synchronous = NORMAL");
   db.run("PRAGMA foreign_keys = ON");
-  // 2026-05-21 tuning bump: 326K-event substrate showed worker first-ticks
-  // doing aggregate queries that thrashed the 40MB page cache. Bumping
-  // cache to ~200MB (50K pages × 4KB) keeps frequently-queried views
-  // (event_kind_occurrence, worker_liveness, etc.) hot.
-  db.run("PRAGMA cache_size = 50000");
-  // 1GB mmap supports the current state.db growth path (782MB observed)
-  // without re-mmapping on each new page. Linux maps lazily so unused
-  // bytes don't reserve physical memory.
-  db.run("PRAGMA mmap_size = 1073741824");
-  // Temp tables and intermediate sorts live in RAM, not on disk. Speeds
-  // up aggregate worker queries that materialize temp result sets.
-  db.run("PRAGMA temp_store = MEMORY");
+  // Native-memory bound (2026-05-26 meltdown triage): the unbounded hot
+  // ledger (414K events / 1.37GB) made aggregate queries spike NATIVE RSS
+  // to 5-9GB and segfault — /health proved JS heap=30MB, caches=12KB, so the
+  // RSS was SQLite native memory (page cache + temp_store=MEMORY temp-sets +
+  // mmap). These pragmas TRADE aggregate speed for bounded memory so the
+  // daemon stays responsive over a large ledger until the brain ships the
+  // proper tiered-data architecture (bounded hot + transparent cold-read).
+  //   - soft_heap_limit caps SQLite's process-wide heap (page cache + any
+  //     in-RAM temp), forcing reclaim instead of unbounded growth.
+  //   - temp_store=FILE spills aggregate temp tables/sorts to disk instead
+  //     of ballooning native RAM (the dominant spike source).
+  //   - cache + mmap reduced from the prior 200MB/1GB tuning.
+  db.run("PRAGMA soft_heap_limit = 1610612736"); // 1.5GB process-wide SQLite heap ceiling
+  db.run("PRAGMA cache_size = 16000");           // ~64MB page cache (was 200MB)
+  db.run("PRAGMA mmap_size = 268435456");        // 256MB memory-mapped reads (was 1GB)
+  db.run("PRAGMA temp_store = FILE");            // aggregate temp-sets spill to disk, not native RAM
   // WAL hygiene (foundational fix 2026-05-16; reactivity fix 2026-05-24).
   //
   // HISTORY (load-bearing — do NOT strip without reading the 67MB-WAL
@@ -626,6 +630,12 @@ const applyReaderPragmas = (db: Database): void => {
   db.run("PRAGMA foreign_keys = ON");
   db.run("PRAGMA cache_size = 2000");
   db.run("PRAGMA mmap_size = 268435456");
+  // Native-memory bound (2026-05-26 meltdown triage): the reader pool runs
+  // the aggregate queries over the large hot ledger; spill their temp-sets
+  // to disk and cap process-wide SQLite heap so concurrent readers can't
+  // balloon native RSS. See the openDb pragma note above.
+  db.run("PRAGMA temp_store = FILE");
+  db.run("PRAGMA soft_heap_limit = 1610612736");
 };
 
 /** F9 writer pool pragmas: tuned for multi-terminal contention.
