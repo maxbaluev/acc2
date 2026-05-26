@@ -309,6 +309,30 @@ describe("supervisor — no-closure-progress loop detector", () => {
     const archived = db.query("SELECT 1 FROM events WHERE kind='directive_archived_by_operator' AND directive_id=? LIMIT 1").get(dir);
     expect(archived).toBeNull();
   });
+
+  test("does NOT force-fail a task whose most-recent ledger row is owner_input_required (owner-blocked is progress, not a storm)", async () => {
+    const db = openDb(":memory:");
+    const dir = "DIRWAITOWNER000000000000000";
+    // >4 productive dispatches with no structural-commit progress would
+    // normally trip the no-closure-progress fallback. But the most-recent
+    // ledger row is owner_input_required — the task is legitimately BLOCKED
+    // on owner input, which now counts as progress and must NOT be force-failed.
+    insertClosedDispatch(db, dir, "TWAIT", "2026-05-22T00:00:00.000Z", "wait-dispatch-1");
+    insertClosedDispatch(db, dir, "TWAIT", "2026-05-22T00:01:00.000Z", "wait-dispatch-2");
+    insertClosedDispatch(db, dir, "TWAIT", "2026-05-22T00:02:00.000Z", "wait-dispatch-3");
+    insertClosedDispatch(db, dir, "TWAIT", "2026-05-22T00:03:00.000Z", "wait-dispatch-4");
+    insertClosedDispatch(db, dir, "TWAIT", "2026-05-22T00:04:00.000Z", "wait-dispatch-5");
+    db.query(
+      `INSERT INTO events (id, ts, kind, substrate_origin, directive_id, task_id, loop_id, payload)
+       VALUES (?, ?, 'owner_input_required', 'substrate_auto', ?, ?, '', ?)`,
+    ).run(newId(), "2026-05-22T00:04:30.000Z", dir, "TWAIT", JSON.stringify({ reason: "awaiting_owner_decision" }));
+
+    const nowMs = Date.parse("2026-05-22T00:05:00.000Z");
+    const flagged = detectNoClosureProgressLoop(db, { nowMs });
+    expect(flagged.map((f) => f.directive_id)).not.toContain(dir);
+    const archived = db.query("SELECT 1 FROM events WHERE kind='directive_archived_by_operator' AND directive_id=? LIMIT 1").get(dir);
+    expect(archived).toBeNull();
+  });
 });
 
 describe("supervisor — supervisorTick composition", () => {
