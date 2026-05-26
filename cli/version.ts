@@ -12,6 +12,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { auxBaseUrl, rpcGet } from "./rpc";
+import { probeCamofoxAvailability } from "../runtime/runtimes/camofox";
 import { resolveDbPath } from "../runtime/state_paths";
 import { openDb, closeDb } from "../substrate/db";
 import { inspectPendingMigrations } from "../substrate/migration_runner";
@@ -74,7 +75,12 @@ export const runVersion = async (argv: string[]): Promise<number> => {
   const daemonHead = await readDaemonGitHead();
   const sourceHead = readSourceGitHead();
   const schema = readStateSchemaSnapshot();
-  const tools = { bun: toolVersion("bun"), opencode: toolVersion("opencode"), uv: toolVersion("uv"), nsjail: toolVersion("nsjail", ["--version"]), camoufox: process.env.CAMOUFOX_BINARY_PATH ?? null };
+  // camoufox availability mirrors the runtime probe (binary at the default
+  // ~/.cache path OR CAMOUFOX_BINARY_PATH, plus playwright) — not the env var
+  // alone, so `acc version` agrees with `acc admin install-deps` and the live
+  // runtime resolver instead of falsely reporting "missing" for a fetched binary.
+  const camofoxProbe = probeCamofoxAvailability();
+  const tools = { bun: toolVersion("bun"), opencode: toolVersion("opencode"), uv: toolVersion("uv"), nsjail: toolVersion("nsjail", ["--version"]), camoufox: camofoxProbe.ok ? (camofoxProbe.executable ?? "present") : null };
 
   if (json) {
     console.log(JSON.stringify({
