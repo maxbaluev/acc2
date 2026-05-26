@@ -1825,10 +1825,27 @@ const readKnowledgeRejected = async (
 const readRecentFailures = async (db: Database, k: number): Promise<Array<{ kind: string; ts: string }>> => {
   const rows = await poolQuery<Record<string, unknown>>(
     db,
-    "SELECT failure_kind, ts FROM events WHERE failure_kind IS NOT NULL ORDER BY ts DESC LIMIT ?",
+    `SELECT kind AS event_kind, failure_kind, ts, action_artifact_id, verifier_artifact_id, payload
+       FROM events
+      WHERE failure_kind IS NOT NULL
+      ORDER BY ts DESC
+      LIMIT ?`,
     [k],
   );
-  return rows.map((r) => ({ kind: r.failure_kind as string, ts: r.ts as string }));
+  return rows.map((r) => {
+    const parts = [String(r.failure_kind ?? "unknown")];
+    if (typeof r.action_artifact_id === "string" && r.action_artifact_id.length > 0) parts.push(`action_artifact=${r.action_artifact_id}`);
+    if (typeof r.verifier_artifact_id === "string" && r.verifier_artifact_id.length > 0) parts.push(`verifier_artifact=${r.verifier_artifact_id}`);
+    try {
+      const payload = JSON.parse(String(r.payload ?? "{}")) as Record<string, unknown>;
+      const runtimeError = payload.action_error ?? payload.abort_reason ?? payload.reason ?? payload.detail;
+      if (typeof runtimeError === "string" && runtimeError.length > 0) parts.push(`error=${runtimeError.slice(0, 240)}`);
+      if (typeof payload.stderr_tail === "string" && payload.stderr_tail.length > 0) parts.push(`stderr_tail=${payload.stderr_tail.slice(-240)}`);
+      if (payload.runtimeUnavailable && typeof payload.runtimeUnavailable === "object") parts.push(`runtime_unavailable=${JSON.stringify(payload.runtimeUnavailable).slice(0, 240)}`);
+      if (payload.breakdown && typeof payload.breakdown === "object") parts.push(`breakdown=${JSON.stringify(payload.breakdown).slice(0, 240)}`);
+    } catch { /* keep compact failure kind */ }
+    return { kind: parts.join(" "), ts: String(r.ts ?? "") };
+  });
 };
 
 const readConstitutionalGates = async (db: Database): Promise<string[]> => {

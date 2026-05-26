@@ -1220,4 +1220,36 @@ describe("buildOwnerStateBeliefSection + buildAlignmentActionPolicySection + bui
     expect(text).toContain("## TOP LAWS");
     expect(text).toContain("substrate is still learning");
   });
+
+  test("active_failures section includes structured error fields (failure_kind + artifact ids + error/stderr/breakdown)", async () => {
+    const db = openDb(":memory:");
+    const { taskId, directiveId } = openTask(db);
+    emitEvent(db, {
+      kind: "task_failed",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      action_artifact_id: "art_action_xyz",
+      verifier_artifact_id: "art_verifier_xyz",
+      failure_kind: "runtime_invoke_failed",
+      payload: {
+        action_error: "ModuleNotFoundError: No module named pandas",
+        stderr_tail: "Traceback (most recent call last): line 42 boom",
+        runtimeUnavailable: { runtime: "uv", reason: "binary missing" },
+        breakdown: { correctness: 0.1, completeness: 0.2 },
+      },
+    });
+
+    const composed = await composePrompt(db, { taskId });
+    const failures = composed.sections.find((s) => s.name === "active_failures");
+    expect(failures).toBeDefined();
+    const body = composed.text;
+    expect(body).toContain("runtime_invoke_failed");
+    expect(body).toContain("action_artifact=art_action_xyz");
+    expect(body).toContain("verifier_artifact=art_verifier_xyz");
+    expect(body).toContain("error=ModuleNotFoundError");
+    expect(body).toContain("stderr_tail=");
+    expect(body).toContain("runtime_unavailable=");
+    expect(body).toContain("breakdown=");
+  });
 });
