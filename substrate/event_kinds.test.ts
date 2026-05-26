@@ -278,6 +278,34 @@ describe("EVENT_KINDS registry coverage", () => {
     expect(docs).toContain("state_snapshot_diffed");
   });
 
+  test("symmetric Claude-Code bridge lifecycle kinds are registered with the brain_* metadata shape", () => {
+    // The cc_* engine-bridge lifecycle rows mirror the brain_dispatched /
+    // brain_dispatch_closed metadata (runtime-produced, not embeddable, not a
+    // health metric, not narrative, not mirror-inline) so the substrate-spawned
+    // Claude Code engine is observable exactly like the opencode engine.
+    const db = openDb(":memory:");
+    for (const kind of ["cc_dispatched", "cc_frame_received", "cc_dispatch_closed"] as const) {
+      expect(kind in EVENT_KINDS).toBe(true);
+      const meta = EVENT_KINDS[kind];
+      expect(meta.producer).toBe("runtime");
+      expect(meta.embeddable).toBe(false);
+      expect(meta.mirror_inline).toBe(false);
+      expect(meta.health_metric).toBe(false);
+      expect(meta.narrative).toBe(false);
+      // The registry validator accepts an emit with the open-ended payload.
+      expect(() =>
+        emitEvent(db, {
+          kind,
+          substrate_origin: "claude_code",
+          directive_id: "d_cc_kinds",
+          task_id: "t_cc_kinds",
+          payload: { dispatch_id: "dispatch_cc", engine: "claude_code" },
+          invoker: "claude_code",
+        }),
+      ).not.toThrow();
+    }
+  });
+
   test("emitEvent accepts owner delivery and notification receipts with open-ended payloads", () => {
     const db = openDb(":memory:");
     for (const kind of ["owner_deliverable_published", "owner_notification_pushed"] as const) {

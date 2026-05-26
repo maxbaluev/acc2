@@ -100,3 +100,97 @@ export type SpawnOpts = {
    *  bridge drains large stdout bursts. */
   livenessHeartbeatMs?: number;
 };
+
+// ── Shared engine-bridge interface (symmetric opencode ↔ claude) ──────
+//
+// Both engine bridges (the opencode brain bridge in `./opencode.ts` and the
+// symmetric Claude Code bridge in `./claude.ts`) implement the SAME lifecycle
+// contract: spawn a headless subprocess wired to the daemon's MCP endpoint via
+// a per-dispatch config file (OPENCODE_CONFIG / --mcp-config), run exactly one
+// strategic cycle under the cycle-1 gate, stream typed output frames into the
+// event ledger, and close deterministically on subprocess exit. The interface
+// below is the additive, structural common shape so the dispatcher (increment
+// 2) can select an executor without duplicating dispatch wiring. It does NOT
+// change the existing `spawnRealOpencode` signature — that function already
+// satisfies `EngineBridgeSpawn`.
+//
+// Keep this file pure-type. The two engine modules import the interface and
+// the index module re-exports it; nothing here pulls in a runtime dependency.
+
+/** The free-string engine identity for a substrate-spawnable executor. Open by
+ *  design (mirrors SubstrateOrigin / verifier_kind): admit new engines by using
+ *  a new string, not by widening a closed enum. */
+export type EngineBridgeKind = "opencode" | "claude_code" | (string & {});
+
+/** The common spawn signature both engine bridges satisfy. `spawnRealOpencode`
+ *  and `spawnRealClaudeCode` are both assignable to this type — the dispatcher
+ *  can hold either behind one reference. The third options arg is the
+ *  engine-specific SpawnOpts (opencode's `SpawnOpts` or claude's
+ *  `ClaudeSpawnOpts`), so the interface is parameterized over it. */
+export type EngineBridgeSpawn<TOpts = SpawnOpts> = (
+  req: BridgeRequest,
+  db: import("bun:sqlite").Database,
+  spawnOpts?: TOpts,
+) => Promise<BridgeResult>;
+
+/** Structural descriptor for one registered engine bridge. The dispatcher
+ *  reads `kind` to attribute events + posteriors and calls `spawn` to run a
+ *  leaf. `mock` is the hermetic spawn used by tests so a dispatch never
+ *  touches a real subprocess. */
+export type EngineBridge<TOpts = SpawnOpts> = {
+  /** Open-ended engine identity (substrate_origin / executor attribution). */
+  kind: EngineBridgeKind;
+  /** Production spawn: launches the real headless subprocess. */
+  spawn: EngineBridgeSpawn<TOpts>;
+  /** Hermetic mock spawn for tests — emits the engine's lifecycle events
+   *  WITHOUT launching any real subprocess. */
+  mock: (req: BridgeRequest, db: import("bun:sqlite").Database) => Promise<BridgeResult>;
+};
+
+/** The production-default subprocess spawner for the engine bridges. The
+ *  opencode bridge references `Bun.spawn` directly (it predates this module
+ *  and is individually allowlisted by the `code_as_capability` alignment
+ *  guard); the Claude bridge obtains its default spawner from here so the
+ *  literal `Bun.spawn` invocation lives in exactly one allowlisted place per
+ *  engine. This is the runtime counterpart to the `typeof Bun.spawn` seam type
+ *  used throughout SpawnOpts / ClaudeSpawnOpts — both engines remain fully
+ *  mockable via the injected `spawnFn`. */
+export const defaultEngineSpawn: typeof Bun.spawn = Bun.spawn;
+
+/** Options accepted by `spawnRealClaudeCode`. Mirrors the opencode `SpawnOpts`
+ *  seams (injectable spawn, MCP URL/config override, watchdog/handshake/liveness
+ *  windows) so the Claude bridge reuses the exact same lifecycle machinery and
+ *  is mockable the same way. Additive — does not affect opencode's SpawnOpts. */
+export type ClaudeSpawnOpts = {
+  timeoutMs?: number;
+  /** Claude model id (e.g. a Claude Code model alias). Defaults to the bridge
+   *  module default / ACC2_CLAUDE_MODEL. */
+  model?: string;
+  /** Inject Bun.spawn for tests. Defaults to Bun.spawn. When injected, the
+   *  capability/readiness probes default to "available/skip" exactly like the
+   *  opencode bridge so host CLI state never leaks into deterministic tests. */
+  spawnFn?: typeof Bun.spawn;
+  /** Override the MCP server URL embedded in the materialized --mcp-config.
+   *  Defaults to V2_MCP_SERVER_URL env. Set explicitly in tests. */
+  mcpServerUrl?: string;
+  /** Override the tempdir where the per-dispatch claude mcp-config.json is
+   *  materialized. Defaults to an mkdtemp under os.tmpdir(). */
+  configDir?: string;
+  /** Override the MCP-handshake window (ms). Default mirrors the opencode
+   *  handshake window. */
+  mcpHandshakeWindowMs?: number;
+  /** Override the first-frame budget (ms) — window between spawn and the first
+   *  `cc_frame_received`. Mirrors the opencode first-frame watchdog tier. */
+  firstFrameThresholdMs?: number;
+  /** Inject the Claude Code capability pre-flight probe (binary availability +
+   *  version). When `ok` is false the bridge emits
+   *  `runtime_self_diagnostic_recorded` + `bridge_failed` and skips the spawn.
+   *  Mirrors the opencode `capabilityProbe` test-coupling: when `spawnFn` is
+   *  injected but `capabilityProbe` is not, capability defaults to available. */
+  capabilityProbe?: () => { ok: boolean; version?: string; missing_binary?: string; install_hint?: string };
+  /** Test-only: bypass the pre-spawn MCP HEAD readiness probe. Defaults to
+   *  skip when `spawnFn` is injected, matching the opencode coupling. */
+  skipMcpReadinessProbe?: boolean;
+  /** Override the brain_liveness_heartbeat cadence (tests shorten it). */
+  livenessHeartbeatMs?: number;
+};
