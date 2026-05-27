@@ -63,6 +63,10 @@ const TEST_ONLY_KINDS = new Set<string>([
  *  Keeping this set narrow forces the registry to absorb any actual
  *  new event kind rather than pretending it is a sub-payload value. */
 const NON_EVENT_KIND_LITERALS = new Set([
+  // USS Phase-4 (extractScoredEntities config): the `kind` config field is the
+  // scored-entity discriminator, NOT an event kind. The emitted observation
+  // event (`trajectory_motif_observed`) IS registered; this is the config key.
+  "trajectory_motif",
   // task_edge_recorded.payload.kind values
   "requires", "refines", "watches", "blocks", "depletes",
   // release bundle_kind discriminator values (cli/admin_bundle_release.ts,
@@ -159,6 +163,13 @@ const NON_EVENT_KIND_LITERALS = new Set([
   // become posterior-ranked rows. NOT an event kind — the registry row
   // carries this discriminator; emissions use trajectory_motif_observed.
   "trajectory_motif_predicate",
+  // USS Phase-4 (2026-05-27, commit a10677f): the trajectory-motif scan was
+  // refactored onto the shared `extractScoredEntities` primitive, which takes
+  // a `kind: 'trajectory_motif'` CONFIG field identifying the extractor
+  // (alongside `scorer_entity_kind: 'trajectory_motif_predicate'`). NOT an
+  // event kind — it is the extractor's own identifier; emissions still use
+  // trajectory_motif_observed and rows still use trajectory_motif_predicate.
+  "trajectory_motif",
   // Tier-S5 (2026-05-19, brain KC G3PR7X6TCD4T57D7T6GXCDY9AW):
   // runtime/goal_shape_predicate_extractor.ts admits act_artifact rows
   // with `kind: 'goal_shape_strategy_predicate'` so each distinct
