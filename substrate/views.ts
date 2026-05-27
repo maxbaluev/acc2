@@ -1574,10 +1574,11 @@ CREATE VIEW IF NOT EXISTS promoted_knowledge_view AS
 // only on goal_shape × topology_signature (per SCALAR skill-library SOTA, brain
 // dispatch FNJJPAC55H69379F562DMQK1FM 2026-05-16).
 
-// universal_knowledge_entity_view \u2014 U1 additive projection. Existing rows keep
+// universal_knowledge_entity_view \u2014 U5 additive projection. Existing rows keep
 // their event/table homes; this read-only projection exposes one universal
 // entity surface differentiated by open capability_properties and joined to the
-// canonical scored_entity score lineage.
+// canonical scored_entity score lineage. Lifecycle events fold onto a stable
+// entity_id so capabilities accumulate on one scored entity.
 const VIEW_UNIVERSAL_KNOWLEDGE_ENTITY = `
 CREATE VIEW IF NOT EXISTS universal_knowledge_entity_view AS
   WITH event_entities AS (
