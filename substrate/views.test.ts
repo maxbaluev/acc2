@@ -178,17 +178,46 @@ describe("universal_knowledge_entity_view + universalKnowledgeEntities", () => {
     applyScoredOutcome(db, { entity_id: candidateId, entity_kind: "knowledge_entity", residual: 0.1, ts: tickTs() });
 
     const rows = universalKnowledgeEntities(db, { entity_id: candidateId, limit: 10 });
-    expect(rows.length).toBeGreaterThanOrEqual(2);
-    const candidate = rows.find((r) => r.source_kind === "knowledge_candidate");
-    expect(candidate).toBeTruthy();
-    expect(candidate!.capability_properties.replayable).toBe(1);
-    expect(candidate!.capability_properties.custom_axis).toBe("owner_defined");
-    expect(candidate!.score).toBeGreaterThan(0.5);
-    expect(candidate!.score_event_id).toBeTruthy();
-    expect(candidate!.score_lineage.source).toBe("scored_entity");
+    expect(rows).toHaveLength(1);
+    const candidate = rows[0]!;
+    expect(candidate.capability_properties.proposed).toBe(1);
+    expect(candidate.capability_properties.candidate).toBe(1);
+    expect(candidate.capability_properties.promoted).toBe(1);
+    expect(candidate.capability_properties.replayable).toBe(1);
+    expect(candidate.capability_properties.custom_axis).toBe("owner_defined");
+    expect(candidate.score).toBeGreaterThan(0.5);
+    expect(candidate.score_event_id).toBeTruthy();
+    expect(candidate.score_lineage.source).toBe("scored_entity");
 
     const replayable = universalKnowledgeEntities(db, { capability: "replayable", limit: 10 });
     expect(replayable.map((r) => r.entity_id)).toContain(candidateId);
+  });
+
+  test("collapses proposed, correction, executable, replayable, and trajectory transitions onto one scored entity", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+    const entityId = insertEvent(db, { kind: "knowledge_candidate", directive_id: "d_u5", task_id: "t_u5", payload: { claim: "One universal entity can acquire lifecycle capabilities.", capability_properties: { owner_axis: "u5" } } });
+    insertEvent(db, { kind: "lesson_extracted", directive_id: "d_u5", task_id: "t_u5", payload: { source_candidate_id: entityId, correction: { field: "claim", value: "corrected" } }, context_refs: [entityId] });
+    insertEvent(db, { kind: "act_artifact_candidate", directive_id: "d_u5", task_id: "t_u5", payload: { source_candidate_id: entityId, runtime: "bun", summary: "Executable handle for the same entity" }, context_refs: [entityId] });
+    insertEvent(db, { kind: "knowledge_candidate", directive_id: "d_u5", task_id: "t_u5", payload: { source_candidate_id: entityId, recipe_shape: { enabled: true }, topology_signature: "root>leaf" }, context_refs: [entityId] });
+    insertEvent(db, { kind: "task_committed", directive_id: "d_u5", task_id: "t_u5", payload: { source_candidate_id: entityId, trajectory: { status: "committed" } }, context_refs: [entityId] });
+    applyScoredOutcome(db, { entity_id: entityId, entity_kind: "knowledge_entity", residual: 0.05, ts: tickTs(), projection_key: "u5-one-score-lineage" });
+    const rows = universalKnowledgeEntities(db, { entity_id: entityId, limit: 10 });
+    expect(rows).toHaveLength(1);
+    const row = rows[0]!;
+    expect(row.capability_properties.proposed).toBe(1);
+    expect(row.capability_properties.correction).toBe(1);
+    expect(row.capability_properties.executable).toBe(1);
+    expect(row.capability_properties.replayable).toBe(1);
+    expect(row.capability_properties.trajectory).toBe(1);
+    expect(row.capability_properties.owner_axis).toBe("u5");
+    expect(row.capability_properties.measurement).toBe(1);
+    expect(row.capability_properties.lifecycle_event_count).toBe(6);
+    expect(row.score_lineage.scored_entity_id).toBe(entityId);
+    const scoredRows = db.query("SELECT COUNT(*) AS n FROM scored_entity WHERE entity_id = ?").get(entityId) as { n: number };
+    expect(scoredRows.n).toBe(1);
+    const scoreEvents = db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'entity_score_updated' AND json_extract(payload, '$.entity_id') = ?").get(entityId) as { n: number };
+    expect(scoreEvents.n).toBe(1);
   });
 });
 

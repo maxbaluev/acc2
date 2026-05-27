@@ -1582,64 +1582,44 @@ const VIEW_UNIVERSAL_KNOWLEDGE_ENTITY = `
 CREATE VIEW IF NOT EXISTS universal_knowledge_entity_view AS
   WITH event_entities AS (
     SELECT
-      CASE WHEN e.kind = 'knowledge_promoted' THEN COALESCE(json_extract(e.payload, '$.candidate_id'), json_extract(e.context_refs, '$[0]'), e.id) ELSE e.id END AS entity_id,
-      e.id AS source_event_id,
-      e.ts,
-      e.directive_id,
-      e.task_id,
-      e.substrate_origin,
-      e.kind AS source_kind,
+      COALESCE(json_extract(e.payload, '$.universal_entity_id'), json_extract(e.payload, '$.entity_id'), CASE WHEN e.kind = 'knowledge_promoted' THEN COALESCE(json_extract(e.payload, '$.candidate_id'), json_extract(e.context_refs, '$[0]')) END, json_extract(e.payload, '$.candidate_id'), json_extract(e.payload, '$.source_candidate_id'), json_extract(e.payload, '$.source_event_id'), json_extract(e.payload, '$.source_act_id'), json_extract(e.context_refs, '$[0]'), e.id) AS entity_id,
+      e.id AS source_event_id, e.ts, e.directive_id, e.task_id, e.substrate_origin, e.kind AS source_kind,
       COALESCE(json_extract(e.payload, '$.text'), json_extract(e.payload, '$.claim'), json_extract(e.payload, '$.summary'), json_extract(e.payload, '$.insight'), json_extract(e.payload, '$.synthesized_text')) AS text,
-      json_patch(
-        json_object(
-          'source_kind', e.kind,
-          'candidate', CASE WHEN e.kind = 'knowledge_candidate' THEN 1 ELSE 0 END,
-          'promoted', CASE WHEN e.kind = 'knowledge_promoted' THEN 1 ELSE 0 END,
-          'executable', CASE WHEN e.kind IN ('act_artifact_candidate', 'code_artifact_candidate') OR json_type(e.payload, '$.runtime') IS NOT NULL OR json_type(e.payload, '$.action_handle') IS NOT NULL THEN 1 ELSE 0 END,
-          'replayable', CASE WHEN COALESCE(json_extract(e.payload, '$.recipe_shape.enabled'), 0) IN (1, 'true') OR json_type(e.payload, '$.topology_signature') IS NOT NULL THEN 1 ELSE 0 END,
-          'correction', CASE WHEN e.kind IN ('lesson_extracted', 'contract_amendment_proposed') OR json_type(e.payload, '$.correction') IS NOT NULL THEN 1 ELSE 0 END,
-          'trajectory', CASE WHEN e.kind IN ('task_node_opened', 'task_edge_recorded', 'task_committed', 'action_predicted', 'action_scored') OR json_type(e.payload, '$.trajectory') IS NOT NULL THEN 1 ELSE 0 END,
-          'measurement', CASE WHEN e.kind IN ('action_scored', 'entity_score_updated') OR json_type(e.payload, '$.residual') IS NOT NULL OR json_type(e.payload, '$.metric_name') IS NOT NULL THEN 1 ELSE 0 END
-        ),
-        CASE WHEN json_type(e.payload, '$.capability_properties') = 'object' THEN json_extract(e.payload, '$.capability_properties') ELSE json('{}') END
-      ) AS capability_properties,
-      e.payload,
-      e.context_refs
+      CASE WHEN json_type(e.payload, '$.capability_properties') = 'object' THEN json_extract(e.payload, '$.capability_properties') ELSE json('{}') END AS explicit_capability_properties,
+      CASE WHEN e.kind IN ('knowledge_candidate', 'act_artifact_candidate', 'code_artifact_candidate') OR json_type(e.payload, '$.proposed') IS NOT NULL THEN 1 ELSE 0 END AS proposed_capability,
+      CASE WHEN e.kind = 'knowledge_candidate' THEN 1 ELSE 0 END AS candidate_capability,
+      CASE WHEN e.kind = 'knowledge_promoted' THEN 1 ELSE 0 END AS promoted_capability,
+      CASE WHEN e.kind IN ('act_artifact_candidate', 'code_artifact_candidate') OR json_type(e.payload, '$.runtime') IS NOT NULL OR json_type(e.payload, '$.action_handle') IS NOT NULL THEN 1 ELSE 0 END AS executable_capability,
+      CASE WHEN COALESCE(json_extract(e.payload, '$.recipe_shape.enabled'), 0) IN (1, 'true') OR json_type(e.payload, '$.topology_signature') IS NOT NULL THEN 1 ELSE 0 END AS replayable_capability,
+      CASE WHEN e.kind IN ('lesson_extracted', 'contract_amendment_proposed') OR json_type(e.payload, '$.correction') IS NOT NULL THEN 1 ELSE 0 END AS correction_capability,
+      CASE WHEN e.kind IN ('task_node_opened', 'task_edge_recorded', 'task_committed', 'action_predicted', 'action_scored') OR json_type(e.payload, '$.trajectory') IS NOT NULL THEN 1 ELSE 0 END AS trajectory_capability,
+      CASE WHEN e.kind IN ('action_scored', 'entity_score_updated') OR json_type(e.payload, '$.residual') IS NOT NULL OR json_type(e.payload, '$.metric_name') IS NOT NULL THEN 1 ELSE 0 END AS measurement_capability,
+      e.payload, e.context_refs
     FROM events e
     WHERE e.kind IN ('knowledge_candidate', 'knowledge_promoted', 'knowledge_synthesized', 'lesson_extracted', 'contract_amendment_proposed', 'act_artifact_candidate', 'code_artifact_candidate', 'task_node_opened', 'task_edge_recorded', 'task_committed', 'action_predicted', 'action_scored', 'entity_score_updated')
   ),
+  artifact_entities AS (
+    SELECT COALESCE(a.source_candidate_id, a.id) AS entity_id, a.id AS source_event_id, COALESCE(a.updated_at, a.created_at) AS ts, NULL AS directive_id, NULL AS task_id, 'substrate_auto' AS substrate_origin, 'act_artifact:' || a.status AS source_kind, COALESCE(a.summary, a.name, a.intent, a.body) AS text, json('{}') AS explicit_capability_properties, CASE WHEN a.status = 'admitted' THEN 1 ELSE 0 END AS proposed_capability, 0 AS candidate_capability, CASE WHEN a.status = 'promoted' THEN 1 ELSE 0 END AS promoted_capability, 1 AS executable_capability, 0 AS replayable_capability, 0 AS correction_capability, 0 AS trajectory_capability, 0 AS measurement_capability, json_object('artifact_id', a.id, 'runtime', a.runtime, 'kind', a.kind, 'status', a.status, 'intent', a.intent, 'summary', a.summary, 'source_candidate_id', a.source_candidate_id, 'score', a.score, 'confidence', a.confidence) AS payload, json_array(COALESCE(a.source_candidate_id, a.id)) AS context_refs
+    FROM act_artifact a
+  ),
+  raw_entities AS (SELECT * FROM event_entities UNION ALL SELECT * FROM artifact_entities),
+  aggregated AS (
+    SELECT entity_id, MAX(proposed_capability) AS proposed_capability, MAX(candidate_capability) AS candidate_capability, MAX(promoted_capability) AS promoted_capability, MAX(executable_capability) AS executable_capability, MAX(replayable_capability) AS replayable_capability, MAX(correction_capability) AS correction_capability, MAX(trajectory_capability) AS trajectory_capability, MAX(measurement_capability) AS measurement_capability, COUNT(*) AS lifecycle_event_count, json_group_array(source_kind) AS source_kinds
+    FROM raw_entities WHERE entity_id IS NOT NULL GROUP BY entity_id
+  ),
+  latest_entities AS (
+    SELECT re.*, ROW_NUMBER() OVER (PARTITION BY re.entity_id ORDER BY re.ts DESC, re.source_event_id DESC) AS rn FROM raw_entities re WHERE re.entity_id IS NOT NULL
+  ),
   latest_score_events AS (
-    SELECT
-      json_extract(e.payload, '$.entity_id') AS entity_id,
-      e.id AS score_event_id,
-      e.ts AS score_event_ts,
-      ROW_NUMBER() OVER (PARTITION BY json_extract(e.payload, '$.entity_id') ORDER BY e.ts DESC, e.rowid DESC) AS rn
-    FROM events e
-    WHERE e.kind = 'entity_score_updated' AND json_extract(e.payload, '$.entity_id') IS NOT NULL
+    SELECT json_extract(e.payload, '$.entity_id') AS entity_id, e.id AS score_event_id, e.ts AS score_event_ts, ROW_NUMBER() OVER (PARTITION BY json_extract(e.payload, '$.entity_id') ORDER BY e.ts DESC, e.rowid DESC) AS rn FROM events e WHERE e.kind = 'entity_score_updated' AND json_extract(e.payload, '$.entity_id') IS NOT NULL
   )
-  SELECT
-    ee.entity_id,
-    ee.source_event_id,
-    ee.ts,
-    ee.directive_id,
-    ee.task_id,
-    ee.substrate_origin,
-    ee.source_kind,
-    COALESCE(se.entity_kind, ee.source_kind) AS entity_kind,
-    ee.text,
-    ee.capability_properties,
-    se.posterior_alpha,
-    se.posterior_beta,
-    COALESCE(se.score, CAST(json_extract(ee.payload, '$.score') AS REAL)) AS score,
-    COALESCE(se.confidence, CAST(json_extract(ee.payload, '$.confidence') AS REAL)) AS confidence,
-    se.updated_ts AS score_updated_ts,
-    lse.score_event_id,
+  SELECT le.entity_id, le.source_event_id, le.ts, le.directive_id, le.task_id, le.substrate_origin, le.source_kind, COALESCE(se.entity_kind, le.source_kind) AS entity_kind,
+    COALESCE(le.text, (SELECT re2.text FROM raw_entities re2 WHERE re2.entity_id = le.entity_id AND re2.text IS NOT NULL ORDER BY re2.ts DESC, re2.source_event_id DESC LIMIT 1)) AS text,
+    json_patch(json_object('source_kind', le.source_kind, 'source_kinds', json(a.source_kinds), 'proposed', a.proposed_capability, 'candidate', a.candidate_capability, 'promoted', a.promoted_capability, 'executable', a.executable_capability, 'replayable', a.replayable_capability, 'correction', a.correction_capability, 'trajectory', a.trajectory_capability, 'measurement', a.measurement_capability, 'lifecycle_event_count', a.lifecycle_event_count), COALESCE((SELECT re3.explicit_capability_properties FROM raw_entities re3 WHERE re3.entity_id = le.entity_id AND re3.explicit_capability_properties <> json('{}') ORDER BY re3.ts DESC, re3.source_event_id DESC LIMIT 1), json('{}'))) AS capability_properties,
+    se.posterior_alpha, se.posterior_beta, COALESCE(se.score, CAST(json_extract(le.payload, '$.score') AS REAL)) AS score, COALESCE(se.confidence, CAST(json_extract(le.payload, '$.confidence') AS REAL)) AS confidence, se.updated_ts AS score_updated_ts, lse.score_event_id,
     json_object('scored_entity_id', se.entity_id, 'score_event_id', lse.score_event_id, 'score_event_ts', lse.score_event_ts, 'source', CASE WHEN se.entity_id IS NOT NULL THEN 'scored_entity' ELSE 'payload_projection' END) AS score_lineage,
-    ee.payload,
-    ee.context_refs
-  FROM event_entities ee
-  LEFT JOIN scored_entity se ON se.entity_id = ee.entity_id
-  LEFT JOIN latest_score_events lse ON lse.entity_id = ee.entity_id AND lse.rn = 1;
+    le.payload, le.context_refs
+  FROM latest_entities le JOIN aggregated a ON a.entity_id = le.entity_id LEFT JOIN scored_entity se ON se.entity_id = le.entity_id LEFT JOIN latest_score_events lse ON lse.entity_id = le.entity_id AND lse.rn = 1 WHERE le.rn = 1;
 `;
 
 const VIEW_RECIPE_REGISTRY = `
