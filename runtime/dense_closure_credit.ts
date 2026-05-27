@@ -55,7 +55,7 @@
 // weights through the same residual/Beta machinery. Until that critic is
 // admitted and verified, this deterministic pass remains the safe fallback.
 
-import type { Database } from "bun:sqlite";
+import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { emitEvent, getEventRowById, type EmitEventInput } from "./events";
 import {
@@ -66,6 +66,7 @@ import {
 } from "./artifact_store";
 import { readDagForDirective, type TaskEdge } from "./task_topology";
 import { nowIso } from "./ids";
+import { attachedArchiveSchemas } from "../substrate/db";
 
 // Leaf-node closure-derived credit weight. A normal per-act credit is
 // weight=1.0; the dense backprop intentionally lands at a quarter of that so
@@ -112,6 +113,38 @@ const stringArray = (value: unknown): string[] =>
     ? value.filter((v): v is string => typeof v === "string" && v.length > 0)
     : [];
 
+const eventTables = (db: Database): string[] => ["events", ...attachedArchiveSchemas(db).map((schema) => `${schema}.events`)];
+
+const selectEventRowsAcrossTiers = <T extends Record<string, unknown>>(
+  db: Database,
+  selectCols: string,
+  whereSql: string,
+  params: SQLQueryBindings[] = [],
+  opts?: { order?: "ASC" | "DESC"; limit?: number },
+): T[] => {
+  const rows: T[] = [];
+  for (const table of eventTables(db)) {
+    try {
+      rows.push(...db.query(`SELECT ${selectCols} FROM ${table} WHERE ${whereSql}`).all(...params) as T[]);
+    } catch (err) {
+      if (table === "events") throw err;
+    }
+  }
+  if (opts?.order) {
+    const dir = opts.order;
+    rows.sort((a, b) => String(a.ts ?? "").localeCompare(String(b.ts ?? "")) * (dir === "ASC" ? 1 : -1));
+  }
+  return typeof opts?.limit === "number" ? rows.slice(0, opts.limit) : rows;
+};
+
+const firstEventRowAcrossTiers = <T extends Record<string, unknown>>(
+  db: Database,
+  selectCols: string,
+  whereSql: string,
+  params: SQLQueryBindings[] = [],
+  order: "ASC" | "DESC" = "ASC",
+): T | null => selectEventRowsAcrossTiers<T>(db, selectCols, whereSql, params, { order, limit: 1 })[0] ?? null;
+
 export type DenseClosureCreditInput = {
   /** Event id of the task_closure_audited row that triggered this pass. */
   closure_audit_event_id: string;
@@ -143,15 +176,13 @@ export const resolveDirectiveRootTaskId = (
   db: Database,
   directiveId: string,
 ): string | null => {
-  const row = db
-    .query<{ task_id: string }, [string]>(
-      `SELECT task_id FROM events
-       WHERE directive_id = ?
-         AND kind = 'task_node_opened'
-         AND (parent_task_id IS NULL OR parent_task_id = '')
-       ORDER BY ts ASC LIMIT 1`,
-    )
-    .get(directiveId);
+  const row = firstEventRowAcrossTiers<{ task_id: string; ts: string }>(
+    db,
+    "task_id, ts",
+    "directive_id = ? AND kind = 'task_node_opened' AND (parent_task_id IS NULL OR parent_task_id = '')",
+    [directiveId],
+    "ASC",
+  );
   return row?.task_id ?? null;
 };
 
@@ -240,13 +271,13 @@ const collectContributors = (
   // ids on payload + context_refs) and act_tuple_recorded (caller-declared
   // citation envelope). Both are the canonical citation surfaces.
   if (taskIds.length > 0) {
-    const actRows = db
-      .query(
-        `SELECT task_id, payload, context_refs FROM events
-         WHERE kind IN ('action_predicted','act_tuple_recorded')
-           AND task_id IN (${placeholders})`,
-      )
-      .all(...taskIds) as Array<{ task_id: string; payload: string; context_refs: string }>;
+    const actRows = selectEventRowsAcrossTiers<{ task_id: string; payload: string; context_refs: string; ts: string }>(
+      db,
+      "task_id, payload, context_refs, ts",
+      `kind IN ('action_predicted','act_tuple_recorded') AND task_id IN (${placeholders})`,
+      taskIds,
+      { order: "ASC" },
+    );
     for (const r of actRows) {
       const d = depth.get(r.task_id) ?? 0;
       const p = jsonObject(r.payload);
@@ -259,13 +290,13 @@ const collectContributors = (
   const structuralTaskIds = opts?.structuralTaskIds ?? [];
   if (structuralTaskIds.length > 0) {
     const structuralPlaceholders = structuralTaskIds.map(() => "?").join(",");
-    const structuralRows = db
-      .query(
-        `SELECT task_id, payload, context_refs FROM events
-         WHERE kind IN ('task_node_opened','task_edge_recorded')
-           AND task_id IN (${structuralPlaceholders})`,
-      )
-      .all(...structuralTaskIds) as Array<{ task_id: string; payload: string; context_refs: string }>;
+    const structuralRows = selectEventRowsAcrossTiers<{ task_id: string; payload: string; context_refs: string; ts: string }>(
+      db,
+      "task_id, payload, context_refs, ts",
+      `kind IN ('task_node_opened','task_edge_recorded') AND task_id IN (${structuralPlaceholders})`,
+      structuralTaskIds,
+      { order: "ASC" },
+    );
     for (const r of structuralRows) {
       const d = depth.get(r.task_id) ?? 0;
       const p = jsonObject(r.payload);
@@ -277,13 +308,13 @@ const collectContributors = (
   // retrieval_binding rows scoped to these tasks: the bound source event /
   // artifact is a retrieval contributor to the task's outcome.
   if (taskIds.length > 0) {
-    const bindingRows = db
-      .query(
-        `SELECT task_id, payload FROM events
-         WHERE kind = 'retrieval_binding'
-           AND task_id IN (${placeholders})`,
-      )
-      .all(...taskIds) as Array<{ task_id: string; payload: string }>;
+    const bindingRows = selectEventRowsAcrossTiers<{ task_id: string; payload: string; ts: string }>(
+      db,
+      "task_id, payload, ts",
+      `kind = 'retrieval_binding' AND task_id IN (${placeholders})`,
+      taskIds,
+      { order: "ASC" },
+    );
     for (const r of bindingRows) {
       const d = depth.get(r.task_id) ?? 0;
       const p = jsonObject(r.payload);
@@ -327,17 +358,13 @@ const denseProjectionKey = (closureAuditEventId: string, targetId: string): stri
  *  Idempotency guard — keyed on (closure_audit_event_id, target_id). Both the
  *  act_artifact dense-score row and the knowledge dense-confirm/contradict row
  *  stamp the same projection_key, so one lookup covers both branches. */
-const denseCreditExists = (db: Database, key: string): boolean => {
-  const row = db
-    .query<{ x: number }, [string]>(
-      `SELECT 1 AS x FROM events
-       WHERE json_extract(payload, '$.projection_key') = ?
-         AND json_extract(payload, '$.projected_from') = 'dense_closure_credit'
-       LIMIT 1`,
-    )
-    .get(key);
-  return row !== null;
-};
+const denseCreditExists = (db: Database, key: string): boolean =>
+  firstEventRowAcrossTiers<{ x: number; ts: string }>(
+    db,
+    "1 AS x, ts",
+    "json_extract(payload, '$.projection_key') = ? AND json_extract(payload, '$.projected_from') = 'dense_closure_credit'",
+    [key],
+  ) !== null;
 
 /** Dense post-closure credit pass. Idempotent + bounded + additive.
  *

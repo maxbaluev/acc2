@@ -2659,4 +2659,70 @@ describe("credit by-id reads span the hot/cold tier (amendment GZHBMX4R, guarant
     expect(getEventById(db2, kc.id)?.kind).toBe("knowledge_candidate");
     closeDb();
   });
+
+  test("collectCitations reads archived retrieval_binding rows for citation binding", () => {
+    const db = openDb(dbPath);
+    const source = emitEvent(db, {
+      kind: "knowledge_candidate",
+      substrate_origin: "opencode",
+      directive_id: "d_archive_binding",
+      task_id: "t_archive_binding",
+      payload: { claim: "archived binding source" },
+    });
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      directive_id: "d_archive_binding",
+      task_id: "t_archive_binding",
+      action_artifact_id: "AA",
+      verifier_artifact_id: "VV",
+      payload: { cited_knowledge_ids: [source.id] },
+    });
+    const obs = emitEvent(db, {
+      kind: "artifact_observed",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_archive_binding",
+      task_id: "t_archive_binding",
+      action_artifact_id: "AA",
+      payload: {},
+    });
+    const binding = emitEvent(db, {
+      kind: "retrieval_binding",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_archive_binding",
+      task_id: "t_archive_binding",
+      payload: { source_event_id: source.id },
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: "d_archive_binding",
+      task_id: "t_archive_binding",
+      action_artifact_id: "AA",
+      verifier_artifact_id: "VV",
+      residual: 0,
+      payload: {},
+    });
+    archiveRowAndDeleteHot(db, binding.id);
+    closeDb(dbPath);
+    const db2 = openDb(dbPath);
+
+    const cited = __collectCitationsForTest(
+      db2,
+      {
+        action_event_id: ap.id,
+        observation_event_id: obs.id,
+        scored_event_id: scored.id,
+        predicted_residual: 0,
+        observed_residual: 0,
+      },
+      [],
+      [],
+      "AA",
+      "VV",
+    );
+
+    expect(cited).toEqual([{ id: source.id, weightFactor: 1.0 }]);
+    closeDb();
+  });
 });

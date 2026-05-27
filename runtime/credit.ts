@@ -46,7 +46,7 @@
 //   4. `@cite <id>` markers in the action body.
 //   5. `@cite <id>` markers in the verifier body.
 
-import type { Database } from "bun:sqlite";
+import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { getEventById, getEventRowById, type EmitEventInput, emitEvent } from "./events";
 import {
@@ -59,6 +59,7 @@ import {
 import { goalShape } from "./goal_shape";
 import { resolveArtifactId } from "../substrate/migration_runner";
 import { nowIso } from "./ids";
+import { attachedArchiveSchemas } from "../substrate/db";
 // Audit b7kjyk2k1 / Z9MXJ8YHXN1ZH knowledge cold-start (8.2% candidates ever
 // get a verdict). Brain proposal TNY4XZY0GD1W: after each candidate_confirmed
 // / candidate_contradicted credit emit, refresh the candidate's posterior
@@ -96,13 +97,13 @@ const noveltyBonusMultiplier = (db: Database): number =>
  *  through `goalShape()`. Returns empty string when no directive_opened row
  *  exists; in that case the novelty check is a no-op. */
 const resolveGoalShape = (db: Database, directiveId: string): string => {
-  const row = db
-    .query(
-      `SELECT payload FROM events
-       WHERE kind = 'directive_opened' AND directive_id = ?
-       ORDER BY ts DESC LIMIT 1`,
-    )
-    .get(directiveId) as { payload: string } | null;
+  const row = firstEventRowAcrossTiers<{ payload: string; ts: string }>(
+    db,
+    "payload, ts",
+    "kind = 'directive_opened' AND directive_id = ?",
+    [directiveId],
+    "DESC",
+  );
   if (!row) return "";
   try {
     const p = JSON.parse(row.payload ?? "{}") as Record<string, unknown>;
@@ -120,16 +121,11 @@ const resolveGoalShape = (db: Database, directiveId: string): string => {
  *  → returns true (no novelty path). */
 const artifactSeenGoalShape = (db: Database, artifactId: string, goalShapeStr: string): boolean => {
   if (!goalShapeStr) return true;
-  const row = db
-    .query(
-      `SELECT 1 AS x FROM events
-       WHERE kind = 'act_artifact_score_updated'
-         AND action_artifact_id = ?
-         AND payload LIKE ?
-       LIMIT 1`,
-    )
-    .get(artifactId, `%"goal_shape":"${goalShapeStr}"%`) as { x: number } | null;
-  return row !== null;
+  return eventExistsAcrossTiers(
+    db,
+    "kind = 'act_artifact_score_updated' AND action_artifact_id = ? AND payload LIKE ?",
+    [artifactId, `%"goal_shape":"${goalShapeStr}"%`],
+  );
 };
 
 // ── Internal types ─────────────────────────────────────────────────
@@ -164,6 +160,41 @@ type DistributeCreditParams = {
 };
 
 type EventLike = NonNullable<ReturnType<typeof getEventById>>;
+
+const eventTables = (db: Database): string[] => ["events", ...attachedArchiveSchemas(db).map((schema) => `${schema}.events`)];
+
+const selectEventRowsAcrossTiers = <T extends Record<string, unknown>>(
+  db: Database,
+  selectCols: string,
+  whereSql: string,
+  params: SQLQueryBindings[] = [],
+  opts?: { order?: "ASC" | "DESC"; limit?: number },
+): T[] => {
+  const rows: T[] = [];
+  for (const table of eventTables(db)) {
+    try {
+      rows.push(...db.query(`SELECT ${selectCols} FROM ${table} WHERE ${whereSql}`).all(...params) as T[]);
+    } catch (err) {
+      if (table === "events") throw err;
+    }
+  }
+  if (opts?.order) {
+    const dir = opts.order;
+    rows.sort((a, b) => String(a.ts ?? "").localeCompare(String(b.ts ?? "")) * (dir === "ASC" ? 1 : -1));
+  }
+  return typeof opts?.limit === "number" ? rows.slice(0, opts.limit) : rows;
+};
+
+const firstEventRowAcrossTiers = <T extends Record<string, unknown>>(
+  db: Database,
+  selectCols: string,
+  whereSql: string,
+  params: SQLQueryBindings[] = [],
+  order: "ASC" | "DESC" = "ASC",
+): T | null => selectEventRowsAcrossTiers<T>(db, selectCols, whereSql, params, { order, limit: 1 })[0] ?? null;
+
+const eventExistsAcrossTiers = (db: Database, whereSql: string, params: SQLQueryBindings[] = []): boolean =>
+  firstEventRowAcrossTiers<{ x: number; ts: string }>(db, "1 AS x, ts", whereSql, params) !== null;
 
 type CreditProjectionMetadata = {
   sourceActId: string | null;
@@ -478,15 +509,13 @@ const collectCitations = (
   // retrieval-precision feedback; they are not knowledge-truth contradictions.
   if (actionEv && actionEv.task_id && scoredEv) {
     const exposureOnlyBySource = new Map<string, Set<string>>();
-    const bindings = db
-      .query(
-        `SELECT id, payload FROM events
-         WHERE kind = 'retrieval_binding'
-           AND task_id = ?
-           AND ts <= ?
-         ORDER BY ts ASC`,
-      )
-      .all(actionEv.task_id, scoredEv.ts) as Array<{ id: string; payload: string }>;
+    const bindings = selectEventRowsAcrossTiers<{ id: string; payload: string; ts: string }>(
+      db,
+      "id, payload, ts",
+      "kind = 'retrieval_binding' AND task_id = ? AND ts <= ?",
+      [actionEv.task_id, scoredEv.ts],
+      { order: "ASC" },
+    );
     for (const b of bindings) {
       try {
         const p = JSON.parse(b.payload) as Record<string, unknown>;
@@ -526,15 +555,13 @@ const collectCitations = (
   }
 
   if (actionEv && actionEv.task_id && scoredEv) {
-    const propagated = db
-      .query(
-        `SELECT payload FROM events
-         WHERE kind = 'knowledge_propagated'
-           AND task_id = ?
-           AND ts <= ?
-         ORDER BY ts ASC`,
-      )
-      .all(actionEv.task_id, scoredEv.ts) as Array<{ payload: string }>;
+    const propagated = selectEventRowsAcrossTiers<{ payload: string; ts: string }>(
+      db,
+      "payload, ts",
+      "kind = 'knowledge_propagated' AND task_id = ? AND ts <= ?",
+      [actionEv.task_id, scoredEv.ts],
+      { order: "ASC" },
+    );
     for (const row of propagated) {
       try {
         const p = JSON.parse(row.payload) as Record<string, unknown>;
@@ -1124,13 +1151,16 @@ export const distributeCredit = async (
       if (!bundleId || seenBundles.has(bundleId)) continue;
       seenBundles.add(bundleId);
       // Idempotency: skip if a prior meta_credit_projected row already
-      // exists for (scored_event_id, bundle).
+      // exists for (scored_event_id, bundle). Tier-spanning: the prior
+      // projection row may have aged into a cold archive (meta_credit_projected
+      // is not in ALWAYS_KEEP_KINDS), so the dedup must read hot + attached
+      // archives or it would double-credit the composer bundle after archival.
       const projectionKey = "meta_credit:" + params.scored_event_id + ":" + bundleId;
-      const prior = db
-        .query<{ x: number }, [string]>(
-          "SELECT 1 AS x FROM events WHERE kind = 'meta_credit_projected' AND json_extract(payload, '$.projection_key') = ? LIMIT 1",
-        )
-        .get(projectionKey);
+      const prior = eventExistsAcrossTiers(
+        db,
+        "kind = 'meta_credit_projected' AND json_extract(payload, '$.projection_key') = ?",
+        [projectionKey],
+      );
       if (prior) continue;
       const bundleRow = getArtifact(db, bundleId);
       let postScore: number | null = null;
@@ -1285,11 +1315,15 @@ type RecordBrainAccuracyParams = {
 const recordBrainAccuracy = (db: Database, params: RecordBrainAccuracyParams): void => {
   const projectionKey =
     "brain_accuracy:" + params.action_predicted_event_id + ":" + params.action_scored_event_id;
-  const prior = db
-    .query<{ x: number }, [string]>(
-      "SELECT 1 AS x FROM events WHERE kind = 'brain_accuracy_observation' AND json_extract(payload, '$.projection_key') = ? LIMIT 1",
-    )
-    .get(projectionKey);
+  // Tier-spanning: the prior brain_accuracy_observation may have aged into a
+  // cold archive (not an ALWAYS_KEEP_KIND), so the idempotency probe must read
+  // hot + attached archives or the per-(predicted,scored) accuracy posterior
+  // would be credited twice after archival.
+  const prior = eventExistsAcrossTiers(
+    db,
+    "kind = 'brain_accuracy_observation' AND json_extract(payload, '$.projection_key') = ?",
+    [projectionKey],
+  );
   if (prior) return;
   const predicted = clampResidual(params.predicted_residual);
   const observed = clampResidual(params.observed_residual);
@@ -1387,22 +1421,20 @@ export const distributeOwnerObservedOutcomeCredit = async (
   }
   const sourceActId = resolveOwnerObservedSourceActId(db, ownerEv);
   if (!sourceActId) throw new Error("owner_observed_outcome_missing_source_act_id");
-  const actionRow = db
-    .query<{ id: string; predicted_residual: number | null }, [string, string]>(
-      `SELECT id, predicted_residual FROM events
-       WHERE kind = 'action_predicted'
-         AND (json_extract(payload, '$.source_act_id') = ? OR EXISTS (SELECT 1 FROM json_each(context_refs) WHERE value = ?))
-       ORDER BY ts ASC LIMIT 1`,
-    )
-    .get(sourceActId, sourceActId);
-  const scoredRow = db
-    .query<{ id: string; predicted_residual: number | null; residual: number | null }, [string, string]>(
-      `SELECT id, predicted_residual, residual FROM events
-       WHERE kind = 'action_scored'
-         AND (json_extract(payload, '$.source_act_id') = ? OR EXISTS (SELECT 1 FROM json_each(context_refs) WHERE value = ?))
-       ORDER BY ts ASC LIMIT 1`,
-    )
-    .get(sourceActId, sourceActId);
+  const actionRow = firstEventRowAcrossTiers<{ id: string; predicted_residual: number | null; ts: string }>(
+    db,
+    "id, predicted_residual, ts",
+    "kind = 'action_predicted' AND (json_extract(payload, '$.source_act_id') = ? OR EXISTS (SELECT 1 FROM json_each(context_refs) WHERE value = ?))",
+    [sourceActId, sourceActId],
+    "ASC",
+  );
+  const scoredRow = firstEventRowAcrossTiers<{ id: string; predicted_residual: number | null; residual: number | null; ts: string }>(
+    db,
+    "id, predicted_residual, residual, ts",
+    "kind = 'action_scored' AND (json_extract(payload, '$.source_act_id') = ? OR EXISTS (SELECT 1 FROM json_each(context_refs) WHERE value = ?))",
+    [sourceActId, sourceActId],
+    "ASC",
+  );
   if (!actionRow || !scoredRow) throw new Error(`owner_observed_outcome_missing_projected_action:${sourceActId}`);
   const observedResidual = residualFromOwnerObservedOutcome(ownerEv, scoredRow.residual ?? 1);
   return distributeCredit(db, {
@@ -1472,14 +1504,8 @@ const promptPolicySelectionRowsForLineage = (
   )
   .all(taskId, beforeTsParam);
 
-const projectionKeyExists = (db: Database, kind: string, key: string): boolean => {
-  const row = db
-    .query<{ x: number }, [string, string]>(
-      "SELECT 1 AS x FROM events WHERE kind = ? AND json_extract(payload, '$.projection_key') = ? LIMIT 1",
-    )
-    .get(kind, key);
-  return row !== null;
-};
+const projectionKeyExists = (db: Database, kind: string, key: string): boolean =>
+  eventExistsAcrossTiers(db, "kind = ? AND json_extract(payload, '$.projection_key') = ?", [kind, key]);
 
 /** Broader idempotency check — has any prior act_artifact_score_updated
  *  row already been emitted that mentions both the scored_event_id and
@@ -1518,10 +1544,7 @@ const priorScoreUpdateExists = (
          AND json_extract(payload, '$.scored_event_id') = ?
          AND json_extract(payload, '$.artifact_id') = ?
        LIMIT 1`;
-  const row = db
-    .query<{ x: number }, [string, string]>(sql)
-    .get(scoredEventId, artifactId);
-  return row !== null;
+  return eventExistsAcrossTiers(db, sql.replace(/^SELECT 1 AS x FROM events WHERE /, "").replace(/\s+LIMIT 1$/, ""), [scoredEventId, artifactId]);
 };
 
 type ScoredEventLite = {
@@ -2169,21 +2192,11 @@ const bindingProjectionKey = (retrievalBindingEventId: string): string =>
   "retrieval_binding_credit:" + retrievalBindingEventId;
 
 const bindingProjectionExists = (db: Database, key: string): boolean => {
-  const row = db
-    .query<{ x: number }, [string]>(
-      "SELECT 1 AS x FROM events WHERE kind = 'candidate_confirmed' AND json_extract(payload, '$.projection_key') = ? LIMIT 1",
-    )
-    .get(key);
-  if (row) return true;
+  if (eventExistsAcrossTiers(db, "kind = 'candidate_confirmed' AND json_extract(payload, '$.projection_key') = ?", [key])) return true;
   // Decorative citations land as retrieval_rejected rows that also
   // stamp the same projection_key so the hook is idempotent across
   // both terminal branches.
-  const rejected = db
-    .query<{ x: number }, [string]>(
-      "SELECT 1 AS x FROM events WHERE kind = 'retrieval_rejected' AND json_extract(payload, '$.projection_key') = ? LIMIT 1",
-    )
-    .get(key);
-  return rejected !== null;
+  return eventExistsAcrossTiers(db, "kind = 'retrieval_rejected' AND json_extract(payload, '$.projection_key') = ?", [key]);
 };
 
 const KNOWLEDGE_BEARING_KINDS = new Set<string>([

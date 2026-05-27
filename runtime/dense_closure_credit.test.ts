@@ -8,7 +8,7 @@
 // high residual → negative (beta) credit; running twice does not double-credit;
 // the root act is excluded so existing terminal credit is unchanged.
 
-import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import { emitEvent, flushPostCommitProjectionsForTest, resetPostCommitProjectionsForTest } from "./events";
 import { insertArtifact, getArtifact } from "./artifact_store";
@@ -19,6 +19,10 @@ import {
   __depthByTaskForTest,
 } from "./dense_closure_credit";
 import type { Database } from "bun:sqlite";
+import { Database as Sqlite } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 afterAll(() => closeDb());
 beforeEach(() => {
@@ -472,5 +476,67 @@ describe("distributeDenseClosureCredit — bounded + additive trigger", () => {
     );
     expect(rows.length).toBe(1);
     expect(rows[0]!.role).toBe("dense_closure_contributor");
+  });
+});
+
+describe("dense closure credit spans hot/cold archives", () => {
+  let tmpDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    resetPostCommitProjectionsForTest();
+    closeDb();
+    _resetTaskTopologyCacheForTests();
+    tmpDir = mkdtempSync(join(tmpdir(), "acc2-tiered-dense-credit-"));
+    dbPath = join(tmpDir, "state.db");
+  });
+
+  afterEach(() => {
+    closeDb();
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  const archiveRowAndDeleteHot = (db: Database, id: string): void => {
+    const row = db.query("SELECT * FROM events WHERE id = ?").get(id) as Record<string, unknown>;
+    const archivePath = join(tmpDir, "state-archive-2026-01.db");
+    const arch = new Sqlite(archivePath, { create: true, strict: true });
+    const cols = Object.keys(row);
+    arch.exec(`CREATE TABLE IF NOT EXISTS events (${cols.map((c) => `${c} ${c === "id" ? "TEXT PRIMARY KEY" : "TEXT"}`).join(", ")})`);
+    arch.query(`INSERT INTO events (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(...cols.map((c) => row[c] as never));
+    arch.close();
+    db.run("DELETE FROM events WHERE id = ?", [id]);
+  };
+
+  test("credits contributors when DAG and action rows are archived", () => {
+    const db = openDb(dbPath);
+    const dir = "dir_dense_archive";
+    const { root, childA } = seedDirective(db, dir);
+    makeArtifact(db, "art_archive_dense");
+    const act = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      directive_id: dir,
+      task_id: childA,
+      payload: { cited_artifact_ids: ["art_archive_dense"] },
+    });
+
+    for (const row of db.query("SELECT id FROM events WHERE directive_id = ? AND kind IN ('task_node_opened','task_edge_recorded')").all(dir) as Array<{ id: string }>) {
+      archiveRowAndDeleteHot(db, row.id);
+    }
+    archiveRowAndDeleteHot(db, act.id);
+    closeDb(dbPath);
+    const db2 = openDb(dbPath);
+    _resetTaskTopologyCacheForTests();
+
+    const before = getArtifact(db2, "art_archive_dense")!;
+    const res = distributeDenseClosureCredit(db2, {
+      closure_audit_event_id: "audit_archive_dense",
+      directive_id: dir,
+      root_task_id: root,
+      closure_residual: 0.05,
+    });
+
+    expect(res.ran).toBe(true);
+    expect(getArtifact(db2, "art_archive_dense")!.posteriorAlpha).toBeGreaterThan(before.posteriorAlpha);
   });
 });
