@@ -28,6 +28,7 @@ import { newId } from "./ids";
 import { poolQuery } from "./sql_pool_singleton";
 import { composePrompt, readOwnerProfile, taskNodeExists } from "./prompt_composer";
 import { evaluateOwnerControlGate } from "./owner_state_transition_verifier";
+import { getOpenBrainDispatches } from "./brain_dispatch_reconciler";
 import { getReloadable } from "./reloadable";
 
 // Hot-reload deep-improvement (2026-05-17): resolve composePrompt through
@@ -295,10 +296,63 @@ export const dispatchReadyTask = async (
       } as JsonValue,
     });
     violations.push("missing_task_node_opened_for_brain_dispatch");
+    // Terminal dead-letter (MBZC8AZP) — the dispatcher_violation alone does NOT
+    // remove the orphan from the scheduler's candidate set / dispatch-survival
+    // in-flight set, so the scheduler re-picks the same orphan every tick →
+    // re-evaluate → gate decision → guard refuses → loop forever (~50 events/s,
+    // ledger re-bloat). To break the loop we ALSO terminally abandon the orphan
+    // (so ready_tasks_view / the scheduler exclude it) and synthetically close
+    // any dangling `brain_dispatched` (so dispatch-survival no longer treats it
+    // as live). IDEMPOTENT: if the task already carries a terminal we emit
+    // NOTHING new — a second pass through the guard is a pure no-op, so the
+    // terminal fires AT MOST ONCE per orphan and the loop stops after one cycle.
+    const terminalRows = await poolQuery<{ kind: string }>(
+      db,
+      "SELECT kind FROM events WHERE task_id = ? AND kind IN ('task_committed','task_failed','task_abandoned','task_committed_superseded') LIMIT 1",
+      [task.id],
+    );
+    if (terminalRows.length === 0) {
+      emitEvent(db, {
+        kind: "task_abandoned",
+        substrate_origin: "substrate_auto",
+        directive_id: task.directive_id,
+        task_id: task.id,
+        failure_kind: "missing_task_node_opened_for_brain_dispatch",
+        payload: {
+          dispatch_id: dispatchId,
+          reason: "missing_task_node_opened_for_brain_dispatch",
+          task_id: task.id,
+          note: "orphan reached the dispatch admission guard with no task_node_opened row; dead-lettered so the scheduler/dispatch-survival stop re-picking it",
+        } as JsonValue,
+      });
+      // If this orphan has a dangling in-flight `brain_dispatched` (no matching
+      // `brain_dispatch_closed`), synthetically close it too so dispatch-survival
+      // / brain_dispatch_reconciler no longer treat it as live. getOpenBrainDispatches
+      // is the canonical open-dispatch projection (dispatch_id-keyed open/closed
+      // join) — reuse it rather than re-deriving the same query here.
+      const danglingForTask = getOpenBrainDispatches(db).filter((d) => d.task_id === task.id);
+      const nowMs = Date.now();
+      for (const dangling of danglingForTask) {
+        if (!dangling.dispatch_id) continue;
+        emitEvent(db, {
+          kind: "brain_dispatch_closed",
+          substrate_origin: "substrate_auto",
+          directive_id: dangling.directive_id ?? task.directive_id,
+          task_id: task.id,
+          payload: {
+            dispatch_id: dangling.dispatch_id,
+            closure_reason: "orphaned_missing_task_node",
+            closed_at_ms: nowMs,
+            original_dispatch_event_id: dangling.dispatch_event_id,
+            note: "synthetic close: dangling brain_dispatched on an orphan dead-lettered by the missing-task_node admission guard",
+          } as JsonValue,
+        });
+      }
+    }
     // No brain_dispatched, no composePrompt, no bridge — the dispatcher_violation
-    // above is the only ledger write. The existing abandon/reconcile path owns
-    // the task lifecycle from here. `events` mirrors the other early-return shape
-    // (read-back dispatchEvents); none were collected pre-dispatch, so it is empty.
+    // above (plus the at-most-once terminal dead-letter) are the only ledger
+    // writes. `events` mirrors the other early-return shape (read-back
+    // dispatchEvents); none were collected pre-dispatch, so it is empty.
     return {
       dispatch_id: dispatchId,
       task_id: task.id,

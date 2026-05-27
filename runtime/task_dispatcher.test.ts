@@ -1407,4 +1407,95 @@ describe("deliverable compounding dispatch (Component C)", () => {
       .get(ghostTaskId) as { c: number };
     expect(promptSide.c).toBe(0);
   });
+
+  // MBZC8AZP — orphan dead-letter. The admission guard refusal alone leaves the
+  // orphan in the scheduler candidate set / dispatch-survival in-flight set, so it
+  // is re-picked every tick → re-evaluate → guard refuses → loop forever (~50/s).
+  // The guard must ALSO terminally dead-letter the orphan (task_abandoned + close
+  // any dangling brain_dispatched) so the scheduler/survival never re-pick it — and
+  // the dead-letter must be idempotent (a second pass is a pure no-op).
+  test("admission guard dead-letters the orphan: first attempt emits task_abandoned (+ brain_dispatch_closed for a dangling dispatch); second attempt is a no-op", async () => {
+    const db = openDb(":memory:");
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: "dir_orphan",
+      task_id: "root_orphan",
+      payload: { goal: "orphan directive" } as JsonValue,
+      invoker: "owner",
+    });
+    const orphanTaskId = newId();
+    const danglingDispatchId = newId();
+    // A dangling in-flight brain_dispatched with NO matching brain_dispatch_closed —
+    // this is what dispatch-survival reads as "still live" and re-picks.
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      substrate_origin: "substrate_auto",
+      directive_id: "dir_orphan",
+      task_id: orphanTaskId,
+      payload: { dispatch_id: danglingDispatchId, task_id: orphanTaskId } as JsonValue,
+    });
+    const orphan = {
+      id: orphanTaskId,
+      directive_id: "dir_orphan",
+      parent_id: null,
+      goal: "orphan task with a dangling brain_dispatched and no task_node_opened row",
+      status: "ready" as const,
+    };
+
+    let bridgeCalled = false;
+    const spyBridge = async (_req: BridgeRequest, _db: Database): Promise<BridgeResult> => {
+      bridgeCalled = true;
+      return { ok: true, final_response: "should not run", usage: { tokens: 0 }, emitted_event_ids: [] };
+    };
+    const dispatchOnce = () =>
+      dispatchReadyTask(db, orphan, {
+        bridge: spyBridge as unknown as typeof dispatchReadyTask extends (db: unknown, t: unknown, d: { bridge?: infer B }) => unknown ? B : never,
+      });
+
+    // ── FIRST attempt ──
+    const first = await dispatchOnce();
+    // Guard refusal preserved: dispatcher_violation fired, NO brain_dispatched for
+    // THIS dispatch (the pre-existing dangling one was authored by the test), no bridge.
+    expect(bridgeCalled).toBe(false);
+    expect(first.violations).toContain("missing_task_node_opened_for_brain_dispatch");
+    const violations1 = db
+      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'dispatcher_violation' AND task_id = ? AND failure_kind = 'missing_task_node_opened_for_brain_dispatch'")
+      .get(orphanTaskId) as { c: number };
+    expect(violations1.c).toBe(1);
+    // Terminal dead-letter: exactly one task_abandoned carrying the missing-node failure_kind.
+    const abandoned1 = db
+      .query("SELECT failure_kind, payload FROM events WHERE kind = 'task_abandoned' AND task_id = ?")
+      .all(orphanTaskId) as Array<{ failure_kind: string; payload: string }>;
+    expect(abandoned1.length).toBe(1);
+    expect(abandoned1[0]!.failure_kind).toBe("missing_task_node_opened_for_brain_dispatch");
+    // The dangling brain_dispatched is synthetically closed (dispatch-survival no longer live).
+    const closed1 = db
+      .query("SELECT payload FROM events WHERE kind = 'brain_dispatch_closed' AND task_id = ?")
+      .all(orphanTaskId) as Array<{ payload: string }>;
+    expect(closed1.length).toBe(1);
+    expect((JSON.parse(closed1[0]!.payload) as { dispatch_id: string }).dispatch_id).toBe(danglingDispatchId);
+
+    // ── SECOND attempt (idempotency) ──
+    const second = await dispatchOnce();
+    // The guard still refuses (dispatcher_violation fires again — that is the per-pick
+    // refusal, NOT the dead-letter), but the terminal dead-letter is AT MOST ONCE:
+    // no new task_abandoned, no new brain_dispatch_closed.
+    expect(bridgeCalled).toBe(false);
+    expect(second.violations).toContain("missing_task_node_opened_for_brain_dispatch");
+    const abandoned2 = db
+      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'task_abandoned' AND task_id = ?")
+      .get(orphanTaskId) as { c: number };
+    expect(abandoned2.c).toBe(1); // still exactly one — no duplicate terminal
+    const closed2 = db
+      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'brain_dispatch_closed' AND task_id = ?")
+      .get(orphanTaskId) as { c: number };
+    expect(closed2.c).toBe(1); // still exactly one synthetic close
+    // No brain_dispatched was emitted by the dispatcher across either attempt (only the
+    // single pre-existing dangling row the test authored).
+    const brainDispatched = db
+      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'brain_dispatched' AND task_id = ?")
+      .get(orphanTaskId) as { c: number };
+    expect(brainDispatched.c).toBe(1);
+  });
 });
