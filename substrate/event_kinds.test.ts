@@ -67,7 +67,7 @@ const NON_EVENT_KIND_LITERALS = new Set([
   // scored-entity discriminator, NOT an event kind. The emitted observation
   // events (`trajectory_motif_observed`, `decomposition_strategy_observed`) ARE
   // registered; these are the config keys.
-  "trajectory_motif", "decomposition_strategy",
+  "trajectory_motif", "decomposition_strategy", "goal_shape_predicate",
   // task_edge_recorded.payload.kind values
   "requires", "refines", "watches", "blocks", "depletes",
   // release bundle_kind discriminator values (cli/admin_bundle_release.ts,
@@ -171,6 +171,13 @@ const NON_EVENT_KIND_LITERALS = new Set([
   // event kind — it is the extractor's own identifier; emissions still use
   // trajectory_motif_observed and rows still use trajectory_motif_predicate.
   "trajectory_motif",
+  // USS Phase-4 cut 4/5 (2026-05-27): goal_shape_predicate_extractor.ts
+  // refactored onto `extractScoredEntities`, whose `kind: 'goal_shape_predicate'`
+  // CONFIG field identifies the extractor (alongside
+  // `scorer_entity_kind: 'goal_shape_strategy_predicate'`). NOT an event kind —
+  // emissions still use goal_shape_strategy_observed; rows still use
+  // goal_shape_strategy_predicate.
+  "goal_shape_predicate",
   // Tier-S5 (2026-05-19, brain KC G3PR7X6TCD4T57D7T6GXCDY9AW):
   // runtime/goal_shape_predicate_extractor.ts admits act_artifact rows
   // with `kind: 'goal_shape_strategy_predicate'` so each distinct
