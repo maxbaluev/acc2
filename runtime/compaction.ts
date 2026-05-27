@@ -64,6 +64,26 @@ export const COMPACTION_BATCH_SIZE = 5_000;
  *      views.ts references are comments only; archival evicts it at a 1h TTL,
  *      so a 7-day hot retention is amply safe.
  *
+ *  Convergence fix (2026-05-26): live ledger at ~37k events was dominated by
+ *  high-volume pure-telemetry kinds NOT in this set, starving the aux read
+ *  server (read_path_starved → degraded flaps). Four more telemetry kinds are
+ *  added — each verified (grep of every runtime/ reader) to have NO
+ *  full-history reader, so age-based pruning past the retention window is safe:
+ *    - brain_liveness_heartbeat — pure liveness telemetry; emitted by
+ *      runtime/bridge/opencode.ts, ZERO DB readers (only emitters + comments).
+ *    - sandbox_unenforced_warning — warning telemetry; emitted by
+ *      artifact_admission.ts / runtimes/bun.ts, ZERO DB readers.
+ *    - task_deferred_for_interference — scheduler deferral notice; emitted by
+ *      task_scheduler.ts, ZERO DB readers.
+ *    - constitutional_gate_decision — admission-decision telemetry. HAS two DB
+ *      readers, both RECENCY-bounded, never full-history: prompt_composer.ts
+ *      (`ORDER BY ts DESC LIMIT 10`) and owner_notification_worker.ts
+ *      (`ORDER BY ts ASC LIMIT 100` deduped within a 1h window — fires once per
+ *      fresh trigger, never replays week-old rows). resource_governor.ts /
+ *      dispatch_decider.ts / task_scheduler.ts references are comments or
+ *      emitters only. Active tasks always carry recent gate rows; rows older
+ *      than the retention window belong to closed/abandoned tasks → safe.
+ *
  *  Two kinds from the proposal were EXCLUDED as load-bearing:
  *    - candidate_confirmed — the credit/retrieval citation-binding mechanism
  *      (runtime/credit.ts, runtime/dense_closure_credit.ts) and a live
@@ -77,6 +97,10 @@ export const COMPACTABLE_DERIVED_EVENT_KINDS: readonly string[] = [
   "brain_reasoning_recorded",
   "worker_tick_completed",
   "sql_worker_pool_metrics",
+  "brain_liveness_heartbeat",
+  "sandbox_unenforced_warning",
+  "task_deferred_for_interference",
+  "constitutional_gate_decision",
 ];
 
 /** Retention window for derived telemetry. Rows of a

@@ -171,6 +171,39 @@ describe("compaction.compactDerivedEvents", () => {
     for (const r of counts) expect(r.c).toBe(1);
   });
 
+  test("prunes the four added telemetry kinds after retention but never the credit/knowledge spine", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const ts = oldDerivedTs(now);
+    const taskId = newId();
+    const directiveId = newId();
+    const addedTelemetryKinds = [
+      "brain_liveness_heartbeat",
+      "sandbox_unenforced_warning",
+      "task_deferred_for_interference",
+      "constitutional_gate_decision",
+    ] as const;
+    // Every added kind must be in the compactable allowlist.
+    for (const kind of addedTelemetryKinds) {
+      expect(COMPACTABLE_DERIVED_EVENT_KINDS).toContain(kind);
+      insertEvent(db, kind, ts, taskId, directiveId);
+    }
+    // The credit/knowledge spine kind must survive regardless of age.
+    insertEvent(db, "candidate_confirmed", ts, taskId, directiveId);
+    const pruned = compactDerivedEvents(db, { nowMs: now });
+    expect(pruned).toBe(addedTelemetryKinds.length);
+    // All four telemetry kinds gone.
+    const telemetryLeft = db
+      .query(`SELECT COUNT(*) AS c FROM events WHERE kind IN (${addedTelemetryKinds.map(() => "?").join(",")})`)
+      .get(...addedTelemetryKinds) as { c: number };
+    expect(telemetryLeft.c).toBe(0);
+    // Credit/knowledge spine row untouched.
+    const spineLeft = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'candidate_confirmed'")
+      .get() as { c: number };
+    expect(spineLeft.c).toBe(1);
+  });
+
   test("excludes the load-bearing kinds from the compactable set", () => {
     // Structural guard: the credit/retrieval-binding and calibration-rollup
     // kinds must never appear in the prune allowlist.
