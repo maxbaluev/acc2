@@ -29,10 +29,29 @@
 //
 // Idempotency: re-runs UPDATE the existing row's metrics + posterior,
 // preserving `created_at`. Bounded: yields every 25 directives processed.
+//
+// USS Phase-4 (extractor unification, cut 2/5): this extractor is now a
+// THIN DECLARATIVE CONFIG over the shared `extractScoredEntities` skeleton
+// (runtime/scored_entity_extractor.ts), exactly like
+// runtime/trajectory_motif_extractor.ts (cut 1/5). The skeleton owns the
+// bounded-scan + candidate-iterate + per-candidate yield spine; ALL domain
+// logic (per-directive DAG event pulls, fingerprinting, shape bucketing, the
+// per-directive yield-every-25, metric computation, Beta-posterior upsert,
+// threshold gating, and the decomposition_strategy_observed emit) stays here
+// in the config callbacks, so the emitted events, their payloads, and the
+// scoring are BYTE-IDENTICAL to before. The exported
+// extractDecompositionStrategy signature is preserved — callers are unchanged;
+// internally it just builds the config and calls the skeleton. The candidate
+// set is one entry PER SHAPE CATEGORY (the bucketed aggregate);
+// candidate_builder runs the bounded directive scan + per-directive event
+// pulls and does the heavy yield-every-25 over directives; outcome_linker
+// applies the 5-sample threshold, computes metrics, upserts the predicate row,
+// and emits decomposition_strategy_observed per admitted/refreshed shape.
 
 import type { Database } from "bun:sqlite";
 import { emitEvent } from "./events";
 import { poolQuery } from "./sql_pool_singleton";
+import { extractScoredEntities } from "./scored_entity_extractor";
 
 const YIELD_EVERY_N = 25;
 const PREDICATE_KIND = "decomposition_strategy_predicate";
@@ -389,6 +408,17 @@ type ShapeAggregate = {
   last_observed_ts: string;
 };
 
+/**
+ * A bucketed shape candidate handed to the per-candidate outcome linker. One
+ * candidate per distinct shape_category observed in the window. The skeleton
+ * iterates these (a small set — at most the ShapeCategory cardinality); the
+ * heavy per-directive scan + yield-every-25 happens in candidate_builder.
+ */
+type ShapeCandidate = {
+  shape: ShapeCategory;
+  aggregate: ShapeAggregate;
+};
+
 type ShapeMetrics = {
   shape_category: ShapeCategory;
   sample_count: number;
@@ -538,21 +568,17 @@ export const extractDecompositionStrategy = async (
   const windowDays = Math.max(1, opts?.windowDays ?? DEFAULT_WINDOW_DAYS);
   const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
 
-  const summary: DecompositionStrategySummary = {
-    directives_scanned: 0,
-    shapes_seen: 0,
-    rows_admitted: 0,
-    rows_updated: 0,
-    skipped_below_threshold: 0,
-  };
-
-  // Pull the most-recent task_closure_audited per directive in the
-  // window. A directive can be re-audited; we take the latest closure.
-  // Route through the SQL worker-thread pool when present so this windowed
-  // GROUP BY aggregate over the events table doesn't block the main loop.
-  const directives = (await poolQuery<DirectiveRow>(
-    db,
-    `SELECT directive_id,
+  return extractScoredEntities<DirectiveRow, ShapeCandidate, DecompositionStrategySummary>(db, {
+    kind: "decomposition_strategy",
+    scorer_entity_kind: PREDICATE_KIND,
+    yield_every_n: YIELD_EVERY_N,
+    // Pull the most-recent task_closure_audited per directive in the
+    // window. A directive can be re-audited; we take the latest closure.
+    // Route through the SQL worker-thread pool when present so this windowed
+    // GROUP BY aggregate over the events table doesn't block the main loop.
+    // BOUNDED: LIMIT maxDirectives (default 500) — never an unbounded scan.
+    source_query: {
+      sql: `SELECT directive_id,
             MAX(ts)     AS closure_ts,
             payload     AS closure_payload
        FROM events
@@ -562,98 +588,120 @@ export const extractDecompositionStrategy = async (
       GROUP BY directive_id
       ORDER BY closure_ts DESC
       LIMIT ?`,
-    [cutoff, maxDirectives],
-  ));
+      params: [cutoff, maxDirectives],
+      boundedRowCap: maxDirectives,
+    },
 
-  // Group fingerprints by shape category. Track the latest observed
-  // closure_ts per shape so the predicate row's `last_observed_ts`
-  // reflects when the substrate last saw evidence of this shape.
-  const byShape = new Map<ShapeCategory, ShapeAggregate>();
+    candidate_builder: async (db2, directives) => {
+      const summary: DecompositionStrategySummary = {
+        directives_scanned: 0,
+        shapes_seen: 0,
+        rows_admitted: 0,
+        rows_updated: 0,
+        skipped_below_threshold: 0,
+      };
 
-  let processedSinceYield = 0;
-  for (const dir of directives) {
-    if (processedSinceYield >= YIELD_EVERY_N) {
-      await yieldToEventLoop();
-      processedSinceYield = 0;
-    }
-    processedSinceYield++;
+      // Group fingerprints by shape category. Track the latest observed
+      // closure_ts per shape so the predicate row's `last_observed_ts`
+      // reflects when the substrate last saw evidence of this shape.
+      const byShape = new Map<ShapeCategory, ShapeAggregate>();
 
-    const closurePayload = parsePayload(dir.closure_payload);
-    const closureResidual = numberOr(closurePayload.closure_residual, 1.0);
+      // Heavy per-directive scan + yield-every-25 stays here (byte-identical
+      // to the pre-migration loop). The skeleton's candidate iteration runs
+      // over the SHAPE candidates (small set) after this returns.
+      let processedSinceYield = 0;
+      for (const dir of directives) {
+        if (processedSinceYield >= YIELD_EVERY_N) {
+          await yieldToEventLoop();
+          processedSinceYield = 0;
+        }
+        processedSinceYield++;
 
-    // Per-directive DAG event pull. This is the heavy part of the tick — up
-    // to maxDirectives (500) of these run per tick. Route each through the
-    // pool so the cumulative scan time doesn't peg the main loop.
-    const events = (await poolQuery<DirectiveEventRow>(
-      db,
-      `SELECT id, task_id, parent_task_id, kind, payload
+        const closurePayload = parsePayload(dir.closure_payload);
+        const closureResidual = numberOr(closurePayload.closure_residual, 1.0);
+
+        // Per-directive DAG event pull. This is the heavy part of the tick — up
+        // to maxDirectives (500) of these run per tick. Route each through the
+        // pool so the cumulative scan time doesn't peg the main loop.
+        const events = (await poolQuery<DirectiveEventRow>(
+          db2,
+          `SELECT id, task_id, parent_task_id, kind, payload
          FROM events
         WHERE directive_id = ?
           AND kind IN ('task_node_opened', 'task_edge_recorded')
         ORDER BY ts ASC, rowid ASC`,
-      [dir.directive_id],
-    ));
+          [dir.directive_id],
+        ));
 
-    if (events.length === 0) continue;
+        if (events.length === 0) continue;
 
-    const fingerprint = buildFingerprint(
-      dir.directive_id,
-      dir.closure_ts,
-      closureResidual,
-      events,
-    );
+        const fingerprint = buildFingerprint(
+          dir.directive_id,
+          dir.closure_ts,
+          closureResidual,
+          events,
+        );
 
-    if (fingerprint.total_nodes === 0) continue;
-    summary.directives_scanned++;
+        if (fingerprint.total_nodes === 0) continue;
+        summary.directives_scanned++;
 
-    const entry = byShape.get(fingerprint.shape_category);
-    if (entry) {
-      entry.fingerprints.push(fingerprint);
-      // closure_ts ordering is DESC in the outer query — the FIRST seen
-      // fingerprint per shape carries the most-recent ts.
-      // Keep the max defensively.
-      if (fingerprint.closure_ts > entry.last_observed_ts) {
-        entry.last_observed_ts = fingerprint.closure_ts;
+        const entry = byShape.get(fingerprint.shape_category);
+        if (entry) {
+          entry.fingerprints.push(fingerprint);
+          // closure_ts ordering is DESC in the outer query — the FIRST seen
+          // fingerprint per shape carries the most-recent ts.
+          // Keep the max defensively.
+          if (fingerprint.closure_ts > entry.last_observed_ts) {
+            entry.last_observed_ts = fingerprint.closure_ts;
+          }
+        } else {
+          byShape.set(fingerprint.shape_category, {
+            fingerprints: [fingerprint],
+            last_observed_ts: fingerprint.closure_ts,
+          });
+        }
       }
-    } else {
-      byShape.set(fingerprint.shape_category, {
-        fingerprints: [fingerprint],
-        last_observed_ts: fingerprint.closure_ts,
+
+      // shapes_seen is set here (before per-candidate processing) so it stays
+      // byte-identical with the pre-migration ordering (set after the
+      // directive loop, before the per-shape loop).
+      summary.shapes_seen = byShape.size;
+
+      const candidates: ShapeCandidate[] = Array.from(byShape.entries()).map(
+        ([shape, aggregate]) => ({ shape, aggregate }),
+      );
+      return { candidates, summary };
+    },
+
+    outcome_linker: (db2, candidate, summary) => {
+      const { shape, aggregate: agg } = candidate;
+      if (agg.fingerprints.length < MIN_SAMPLE_COUNT) {
+        summary.skipped_below_threshold++;
+        return;
+      }
+      const metrics = computeMetrics(shape, agg.fingerprints, agg.last_observed_ts);
+      const { id, created } = upsertPredicateRow(db2, metrics);
+      if (created) summary.rows_admitted++;
+      else summary.rows_updated++;
+
+      emitEvent(db2, {
+        kind: "decomposition_strategy_observed",
+        substrate_origin: "substrate_auto",
+        context_refs: [id],
+        payload: {
+          shape_category: shape,
+          predicate_act_artifact_id: id,
+          sample_count: metrics.sample_count,
+          mean_residual: metrics.mean_residual,
+          std_residual: metrics.std_residual,
+          effective_score: metrics.effective_score,
+          avg_fan_out: metrics.avg_fan_out,
+          avg_max_depth: metrics.avg_max_depth,
+          avg_total_nodes: metrics.avg_total_nodes,
+          last_observed_ts: metrics.last_observed_ts,
+          created,
+        },
       });
-    }
-  }
-
-  summary.shapes_seen = byShape.size;
-
-  for (const [shape, agg] of byShape.entries()) {
-    if (agg.fingerprints.length < MIN_SAMPLE_COUNT) {
-      summary.skipped_below_threshold++;
-      continue;
-    }
-    const metrics = computeMetrics(shape, agg.fingerprints, agg.last_observed_ts);
-    const { id, created } = upsertPredicateRow(db, metrics);
-    if (created) summary.rows_admitted++;
-    else summary.rows_updated++;
-
-    emitEvent(db, {
-      kind: "decomposition_strategy_observed",
-      substrate_origin: "substrate_auto",
-      context_refs: [id],
-      payload: {
-        shape_category: shape,
-        predicate_act_artifact_id: id,
-        sample_count: metrics.sample_count,
-        mean_residual: metrics.mean_residual,
-        std_residual: metrics.std_residual,
-        effective_score: metrics.effective_score,
-        avg_fan_out: metrics.avg_fan_out,
-        avg_max_depth: metrics.avg_max_depth,
-        avg_total_nodes: metrics.avg_total_nodes,
-        last_observed_ts: metrics.last_observed_ts,
-        created,
-      },
-    });
-  }
-
-  return summary;
+    },
+  });
 };

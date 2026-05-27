@@ -24,18 +24,27 @@
 // where normalized_std = min(std_residual, 1). LOW variance means the
 // goal_shape tag groups similar trajectories together — which is the
 // whole point of a goal_shape.
+//
+// USS Phase-4 (extractor unification, cut 4/5): this extractor is now a
+// THIN DECLARATIVE CONFIG over the shared `extractScoredEntities` skeleton
+// (runtime/scored_entity_extractor.ts), exactly like trajectory_motif_extractor.
+// The skeleton owns the bounded-scan + candidate-iterate + per-candidate yield
+// loop; ALL domain logic (goal_shape grouping, variance metrics, posterior
+// calibration, idempotent upsert, per-shape emit) stays here in the config
+// callbacks, so the emitted `goal_shape_strategy_observed` events, their
+// payloads, and the Beta scoring are BYTE-IDENTICAL to before. The exported
+// `extractGoalShapePredicates` signature is preserved — callers are unchanged;
+// internally it just builds the config and calls the skeleton.
 
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { emitEvent } from "./events";
-import { poolQuery } from "./sql_pool_singleton";
+import { extractScoredEntities } from "./scored_entity_extractor";
 
 const YIELD_EVERY_N = 25;
 const PREDICATE_KIND = "goal_shape_strategy_predicate";
 const MIN_SAMPLE_COUNT = 5;
 const HASH_PREFIX_LEN = 16;
-
-const yieldToEventLoop = (): Promise<void> => new Promise<void>((r) => setTimeout(r, 0));
 
 type ScoreUpdatedRow = {
   id: string;
@@ -80,6 +89,13 @@ type ShapeMetrics = {
   std_residual: number;
   effective_score: number;
   last_observed_ts: string;
+};
+
+/** A distinct-goal_shape candidate handed to the per-candidate outcome linker. */
+type ShapeCandidate = {
+  goal_shape: string;
+  residuals: number[];
+  lastTs: string;
 };
 
 const computeMetrics = (
@@ -203,6 +219,12 @@ const upsertPredicateRow = (
  * sample_count >= MIN_SAMPLE_COUNT. Empty goal_shape strings are
  * silently skipped (they carry no predictive signal). Re-runs UPDATE
  * existing rows in place and preserve `created_at`.
+ *
+ * USS Phase-4: implemented as a declarative config over the shared
+ * `extractScoredEntities` skeleton. The bounded scan, candidate iteration, and
+ * per-candidate yield are owned by the skeleton; everything domain-specific
+ * (grouping, variance metrics, posterior calibration, idempotent upsert, emit
+ * gating) is in the config callbacks below, so output is byte-identical.
  */
 export const extractGoalShapePredicates = async (
   db: Database,
@@ -212,88 +234,98 @@ export const extractGoalShapePredicates = async (
   const windowDays = Math.max(1, opts?.windowDays ?? 14);
   const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
 
-  const summary: GoalShapePredicateSummary = {
-    scanned: 0,
-    distinct_shapes: 0,
-    rows_admitted: 0,
-    rows_updated: 0,
-    skipped_below_threshold: 0,
-    skipped_empty_shape: 0,
-  };
+  return extractScoredEntities<ScoreUpdatedRow, ShapeCandidate, GoalShapePredicateSummary>(db, {
+    kind: "goal_shape_predicate",
+    scorer_entity_kind: PREDICATE_KIND,
+    yield_every_n: YIELD_EVERY_N,
+    // Windowed scan of recent score-update events. Route through the SQL
+    // worker-thread pool when present so the heavy time-window read doesn't
+    // block the main loop (Bun.SQL is fake-async). The full window aggregate is
+    // genuinely needed each tick (per-shape residual variance), so this is
+    // pool-routed but NOT watermarked.
+    // BOUNDED: LIMIT maxEvents (default 5000) — never an unbounded FROM events.
+    source_query: {
+      sql: `SELECT id, ts, payload FROM events
+              WHERE kind = 'act_artifact_score_updated' AND ts > ?
+              ORDER BY ts ASC LIMIT ?`,
+      params: [cutoff, maxEvents],
+      boundedRowCap: maxEvents,
+    },
 
-  // Windowed scan of recent score-update events. Route through the SQL
-  // worker-thread pool when present so the heavy time-window read doesn't
-  // block the main loop (Bun.SQL is fake-async). The full window aggregate is
-  // genuinely needed each tick (per-shape residual variance), so this is
-  // pool-routed but NOT watermarked.
-  const rows = (await poolQuery<ScoreUpdatedRow>(
-    db,
-    `SELECT id, ts, payload FROM events
-      WHERE kind = 'act_artifact_score_updated' AND ts > ?
-      ORDER BY ts ASC LIMIT ?`,
-    [cutoff, maxEvents],
-  ));
+    candidate_builder: async (_db, rows) => {
+      const summary: GoalShapePredicateSummary = {
+        scanned: 0,
+        distinct_shapes: 0,
+        rows_admitted: 0,
+        rows_updated: 0,
+        skipped_below_threshold: 0,
+        skipped_empty_shape: 0,
+      };
 
-  // Group residuals by goal_shape. Track last_observed_ts per shape.
-  const byShape = new Map<string, { residuals: number[]; lastTs: string }>();
-  for (const row of rows) {
-    summary.scanned++;
-    const payload = parsePayload(row.payload);
-    const shapeRaw = payload.goal_shape;
-    const residual = numberOrNull(payload.residual);
-    if (residual === null) continue;
-    if (typeof shapeRaw !== "string" || shapeRaw.length === 0) {
-      summary.skipped_empty_shape++;
-      continue;
-    }
-    const entry = byShape.get(shapeRaw);
-    if (entry) {
-      entry.residuals.push(residual);
-      // Events were selected ORDER BY ts ASC; this tail value is the
-      // most recent observation for the shape.
-      entry.lastTs = row.ts;
-    } else {
-      byShape.set(shapeRaw, { residuals: [residual], lastTs: row.ts });
-    }
-  }
-  summary.distinct_shapes = byShape.size;
+      // Group residuals by goal_shape. Track last_observed_ts per shape.
+      const byShape = new Map<string, { residuals: number[]; lastTs: string }>();
+      for (const row of rows) {
+        summary.scanned++;
+        const payload = parsePayload(row.payload);
+        const shapeRaw = payload.goal_shape;
+        const residual = numberOrNull(payload.residual);
+        if (residual === null) continue;
+        if (typeof shapeRaw !== "string" || shapeRaw.length === 0) {
+          summary.skipped_empty_shape++;
+          continue;
+        }
+        const entry = byShape.get(shapeRaw);
+        if (entry) {
+          entry.residuals.push(residual);
+          // Events were selected ORDER BY ts ASC; this tail value is the
+          // most recent observation for the shape.
+          entry.lastTs = row.ts;
+        } else {
+          byShape.set(shapeRaw, { residuals: [residual], lastTs: row.ts });
+        }
+      }
+      summary.distinct_shapes = byShape.size;
 
-  // Walk shapes; admit/update rows above threshold. Bounded — yield
-  // every 25 distinct shapes so the daemon's event loop stays
-  // responsive on large windows.
-  let processedSinceYield = 0;
-  for (const [shape, { residuals, lastTs }] of byShape.entries()) {
-    if (processedSinceYield >= YIELD_EVERY_N) {
-      await yieldToEventLoop();
-      processedSinceYield = 0;
-    }
-    processedSinceYield++;
+      // Each distinct shape is a candidate; the skeleton iterates them with
+      // yield-every-25 cadence and the outcome_linker applies the
+      // sample-count threshold gate (preserving skipped_below_threshold
+      // counting on the exact same per-candidate loop as before).
+      const candidates: ShapeCandidate[] = [];
+      for (const [goal_shape, { residuals, lastTs }] of byShape.entries()) {
+        candidates.push({ goal_shape, residuals, lastTs });
+      }
 
-    if (residuals.length < MIN_SAMPLE_COUNT) {
-      summary.skipped_below_threshold++;
-      continue;
-    }
-    const metrics = computeMetrics(shape, residuals, lastTs);
-    const { id, created } = upsertPredicateRow(db, metrics);
-    if (created) summary.rows_admitted++;
-    else summary.rows_updated++;
+      return { candidates, summary };
+    },
 
-    emitEvent(db, {
-      kind: "goal_shape_strategy_observed",
-      substrate_origin: "substrate_auto",
-      context_refs: [id],
-      payload: {
-        goal_shape: shape,
-        predicate_act_artifact_id: id,
-        sample_count: metrics.sample_count,
-        mean_residual: metrics.mean_residual,
-        std_residual: metrics.std_residual,
-        effective_score: metrics.effective_score,
-        last_observed_ts: metrics.last_observed_ts,
-        created,
-      },
-    });
-  }
+    // Walk shapes; admit/update rows above threshold. Bounded — the skeleton
+    // yields every 25 distinct shapes so the daemon's event loop stays
+    // responsive on large windows.
+    outcome_linker: (db2, candidate, summary) => {
+      if (candidate.residuals.length < MIN_SAMPLE_COUNT) {
+        summary.skipped_below_threshold++;
+        return;
+      }
+      const metrics = computeMetrics(candidate.goal_shape, candidate.residuals, candidate.lastTs);
+      const { id, created } = upsertPredicateRow(db2, metrics);
+      if (created) summary.rows_admitted++;
+      else summary.rows_updated++;
 
-  return summary;
+      emitEvent(db2, {
+        kind: "goal_shape_strategy_observed",
+        substrate_origin: "substrate_auto",
+        context_refs: [id],
+        payload: {
+          goal_shape: candidate.goal_shape,
+          predicate_act_artifact_id: id,
+          sample_count: metrics.sample_count,
+          mean_residual: metrics.mean_residual,
+          std_residual: metrics.std_residual,
+          effective_score: metrics.effective_score,
+          last_observed_ts: metrics.last_observed_ts,
+          created,
+        },
+      });
+    },
+  });
 };

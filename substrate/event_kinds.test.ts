@@ -65,8 +65,9 @@ const TEST_ONLY_KINDS = new Set<string>([
 const NON_EVENT_KIND_LITERALS = new Set([
   // USS Phase-4 (extractScoredEntities config): the `kind` config field is the
   // scored-entity discriminator, NOT an event kind. The emitted observation
-  // event (`trajectory_motif_observed`) IS registered; this is the config key.
-  "trajectory_motif",
+  // events (`trajectory_motif_observed`, `decomposition_strategy_observed`) ARE
+  // registered; these are the config keys.
+  "trajectory_motif", "decomposition_strategy",
   // task_edge_recorded.payload.kind values
   "requires", "refines", "watches", "blocks", "depletes",
   // release bundle_kind discriminator values (cli/admin_bundle_release.ts,
