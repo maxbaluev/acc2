@@ -210,8 +210,6 @@ export const extractTrajectoryMotifs = async (
   const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
 
   return extractScoredEntities<EventRow, MotifCandidate, TrajectoryMotifSummary>(db, {
-    kind: "trajectory_motif",
-    scorer_entity_kind: MOTIF_KIND,
     yield_every_n: YIELD_EVERY_N,
     // Pull recent events with a non-null directive_id, ordered by
     // (directive_id, ts) so the sliding-window walk per directive is
@@ -288,7 +286,15 @@ export const extractTrajectoryMotifs = async (
         .sort((a, b) => b.frequency - a.frequency)
         .slice(0, topK);
 
-      return { candidates: frequent, summary };
+      return {
+        candidates: frequent.map((motif) => ({
+          candidate: motif,
+          entity_id: motifId(motif.kinds),
+          entity_kind: MOTIF_KIND,
+          capability_properties: { trajectory: 1, replayable: 1, measurement: 1 },
+        })),
+        summary,
+      };
     },
 
     // For each frequent motif compute closure correlation over the set of
@@ -310,7 +316,8 @@ export const extractTrajectoryMotifs = async (
     // directive the motif appeared in (motif.directives, already tracked by
     // the n-gram aggregation) that also carries a closure residual — not a
     // literal suffix match.
-    outcome_linker: async (db2, motif, summary) => {
+    outcome_linker: async (db2, output, summary) => {
+      const motif = output.candidate;
       const matchingDirectives: string[] = Array.from(motif.directives);
 
       let residualSum = 0;
@@ -388,6 +395,7 @@ export const extractTrajectoryMotifs = async (
             frequency: motif.frequency,
             directive_count: motif.directives.size,
             avg_closure_residual: avgResidual,
+            capability_properties: output.capability_properties,
             admitted_this_tick: created,
             milestone: created ? "first_observation" : `frequency_${motif.frequency}`,
           },

@@ -30,6 +30,7 @@ import {
   retrievalCredit,
   topLaws,
   promotedKnowledge,
+  universalKnowledgeEntities,
   readyTasks,
   recipeRegistry,
   recipesLatestView,
@@ -44,6 +45,7 @@ import {
   taskCriticalPaths,
   watchEdgeObservations,
 } from "./views";
+import { applyScoredOutcome } from "../runtime/posterior";
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
@@ -124,6 +126,7 @@ describe("runViews", () => {
       "entity_relationship_view",
       "failure_view",
       "irreversible_effects_view",
+      "universal_knowledge_entity_view",
       "lesson_implementation_status_view",
       "lesson_implementer_queue_view",
       "owner_conversation_view",
@@ -149,6 +152,45 @@ describe("runViews", () => {
   });
 });
 
+
+
+describe("universal_knowledge_entity_view + universalKnowledgeEntities", () => {
+  test("projects open capability_properties and scored_entity score lineage", () => {
+    const db = openDb(":memory:");
+    runViews(db);
+
+    const candidateId = insertEvent(db, {
+      kind: "knowledge_candidate",
+      directive_id: "d_u1",
+      task_id: "t_u1",
+      payload: {
+        text: "Universal entities are selected by capability presence.",
+        capability_properties: { replayable: 1, custom_axis: "owner_defined" },
+      },
+    });
+    insertEvent(db, {
+      kind: "knowledge_promoted",
+      directive_id: "d_u1",
+      task_id: "t_u1",
+      payload: { candidate_id: candidateId, score: 0.61, confidence: 0.44 },
+      context_refs: [candidateId],
+    });
+    applyScoredOutcome(db, { entity_id: candidateId, entity_kind: "knowledge_entity", residual: 0.1, ts: tickTs() });
+
+    const rows = universalKnowledgeEntities(db, { entity_id: candidateId, limit: 10 });
+    expect(rows.length).toBeGreaterThanOrEqual(2);
+    const candidate = rows.find((r) => r.source_kind === "knowledge_candidate");
+    expect(candidate).toBeTruthy();
+    expect(candidate!.capability_properties.replayable).toBe(1);
+    expect(candidate!.capability_properties.custom_axis).toBe("owner_defined");
+    expect(candidate!.score).toBeGreaterThan(0.5);
+    expect(candidate!.score_event_id).toBeTruthy();
+    expect(candidate!.score_lineage.source).toBe("scored_entity");
+
+    const replayable = universalKnowledgeEntities(db, { capability: "replayable", limit: 10 });
+    expect(replayable.map((r) => r.entity_id)).toContain(candidateId);
+  });
+});
 
 describe("act_projection_observability_view + actProjectionObservability", () => {
   test("returns derived lifecycle, retrieval, owner outcome, and credit ids for one source act", () => {

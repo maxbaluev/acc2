@@ -25,6 +25,7 @@
 // caller's config callbacks. This is a refactor, not a behavior change.
 
 import type { Database } from "bun:sqlite";
+import type { JsonValue } from "../substrate/types";
 import { poolQuery } from "./sql_pool_singleton";
 
 /**
@@ -61,16 +62,26 @@ export type BoundedSourceQuery = {
  *                 ensure its row, link outcomes, and emit).
  *   TSummary    — the extractor's bespoke summary accumulator.
  */
-export type ScoredEntityExtractorConfig<TRow, TCandidate, TSummary> = {
-  /** Free-string entity kind, e.g. "trajectory_motif". Observational. */
-  kind: string;
+export type ScoredEntityCapabilityProperties = Record<string, JsonValue>;
 
+export type ScoredEntityCandidateOutput<TCandidate> = {
+  /** Domain-specific candidate payload used by the extractor's scorer/emitter. */
+  candidate: TCandidate;
+  /** Open capability/property map that differentiates universal entities. */
+  capability_properties: ScoredEntityCapabilityProperties;
+  /** Optional stable entity id for score/update payloads and observability. */
+  entity_id?: string;
+  /** Optional open discriminator retained as provenance metadata, not routing authority. */
+  entity_kind?: string;
+};
+
+export type ScoredEntityExtractorConfig<TRow, TCandidate, TSummary> = {
   /** Bounded window scan. The skeleton runs this via poolQuery. */
   source_query: BoundedSourceQuery;
 
   /**
    * Build the candidate set from the bounded source rows. Returns the
-   * candidates plus the extractor's seeded summary object (so per-extractor
+   * capability-bearing candidates plus the extractor's seeded summary object (so per-extractor
    * counters like directives_scanned / unique_motifs_seen are owned by the
    * caller, keeping the summary shape byte-identical). May be async so it can
    * yield to the event loop during heavy aggregation.
@@ -78,10 +89,10 @@ export type ScoredEntityExtractorConfig<TRow, TCandidate, TSummary> = {
   candidate_builder: (
     db: Database,
     rows: ReadonlyArray<TRow>,
-  ) => Promise<{ candidates: ReadonlyArray<TCandidate>; summary: TSummary }>;
+  ) => Promise<{ candidates: ReadonlyArray<ScoredEntityCandidateOutput<TCandidate>>; summary: TSummary }>;
 
   /**
-   * Per-candidate: ensure the scored row exists, link it to its outcome
+   * Per-candidate output: ensure the scored row exists, link it to its outcome
    * evidence, apply the scoring math (applyResidualOutcome / applyScoredOutcome
    * / bespoke), and emit the extractor's bespoke `*_observed` event when its
    * own emit gate fires. Mutates `summary` in place to record admission /
@@ -90,24 +101,9 @@ export type ScoredEntityExtractorConfig<TRow, TCandidate, TSummary> = {
    */
   outcome_linker: (
     db: Database,
-    candidate: TCandidate,
+    candidate: ScoredEntityCandidateOutput<TCandidate>,
     summary: TSummary,
   ) => void | Promise<void>;
-
-  /** Optional embedding text builder (USS config slot — unused by cut 1). */
-  embedding_text?: (candidate: TCandidate) => string | null;
-
-  /** The scored_entity kind this extractor writes (provenance metadata). */
-  scorer_entity_kind?: string;
-
-  /** Optional promotion-rule key (USS config slot — unused by cut 1). */
-  promotion_rule_key?: string;
-
-  /** Optional contradiction policy (USS config slot — unused by cut 1). */
-  contradiction_policy?: string;
-
-  /** Optional verification fixture handle (USS config slot — unused by cut 1). */
-  verification_fixture?: string;
 
   /**
    * How often (in candidates processed) to yield to the event loop. Defaults
@@ -138,7 +134,7 @@ export const extractScoredEntities = async <TRow, TCandidate, TSummary>(
     // Fail-closed: a scored-entity scan MUST be bounded. There is no
     // unbounded-scan lane in the USS skeleton.
     throw new Error(
-      `scored_entity_extractor:unbounded_scan_refused kind=${config.kind} boundedRowCap=${String(cap)}`,
+      `scored_entity_extractor:unbounded_scan_refused boundedRowCap=${String(cap)}`,
     );
   }
 

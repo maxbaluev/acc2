@@ -32,7 +32,7 @@ import { OWNER_PROFILE_DEFAULTS, OWNER_PROFILE_JSON_SCHEMA } from "./types";
 import { parseResourceRefs } from "../runtime/resource_uri";
 import { decodeEmbeddingBlob } from "../runtime/embedder";
 import { poolQuery } from "../runtime/sql_pool_singleton";
-import { betaMean as canonicalBetaMean, betaEvidenceConfidence } from "../runtime/posterior";
+import { applyScoredOutcome, betaMean as canonicalBetaMean, betaEvidenceConfidence, getScoredEntity } from "../runtime/posterior";
 import { evaluatePromotion } from "../runtime/posterior_promotion";
 import { getThreshold } from "../runtime/threshold_registry";
 
@@ -931,23 +931,35 @@ export const extractActArtifactScores = async (db: Database): Promise<ActArtifac
     for (const art of artifacts) {
       const events = db
         .query(
-          `SELECT residual, directive_id, task_id, loop_id FROM events
+          `SELECT id, ts, residual, directive_id, task_id, loop_id FROM events
            WHERE kind = 'action_scored' AND action_artifact_id = ? AND residual IS NOT NULL
            ORDER BY ts ASC`,
         )
-        .all(art.id) as Array<{ residual: number; directive_id: string; task_id: string; loop_id: string }>;
+        .all(art.id) as Array<{ id: string; ts: string; residual: number; directive_id: string; task_id: string; loop_id: string }>;
 
       if (events.length === 0) continue;
 
-      let wins = 0;
-      let losses = 0;
       for (const ev of events) {
-        if (ev.residual <= RESIDUAL_SUCCESS_THRESHOLD) wins++; else losses++;
+        applyScoredOutcome(db, {
+          entity_id: art.id,
+          entity_kind: "act_artifact",
+          residual: ev.residual,
+          ts: ev.ts,
+          directive_id: ev.directive_id,
+          task_id: ev.task_id,
+          projection_key: "extract_act_artifact_score:" + ev.id + ":" + art.id,
+          payload: {
+            projection_source: "extractActArtifactScores",
+            action_scored_event_id: ev.id,
+          },
+        });
       }
-      const alpha = 1 + wins;
-      const beta = 1 + losses;
-      const score = betaMean(alpha, beta);
-      const confidence = betaConfidence(alpha, beta);
+      const scored = getScoredEntity(db, art.id);
+      if (!scored) continue;
+      const alpha = scored.posterior_alpha;
+      const beta = scored.posterior_beta;
+      const score = scored.score;
+      const confidence = scored.confidence;
       const recentResiduals = events.slice(-RECENT_WINDOW).map((e) => e.residual);
       const recentMean =
         recentResiduals.reduce((a, b) => a + b, 0) / Math.max(1, recentResiduals.length);

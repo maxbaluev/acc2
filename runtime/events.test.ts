@@ -408,7 +408,6 @@ describe("emitEvent act_tuple_recorded projector", () => {
     expect(kinds.filter((k) => k !== "act_tuple_recorded").sort()).toEqual([
       "act_artifact_score_updated",
       "act_artifact_score_updated",
-      "act_artifact_score_updated",
       "action_predicted",
       "action_scored",
       "applied_change_committed",
@@ -419,6 +418,12 @@ describe("emitEvent act_tuple_recorded projector", () => {
       "candidate_confirmed",
       "coalition_credit_distributed",
       "credit_envelope_projected",
+      "entity_score_updated",
+      "entity_score_updated",
+      "entity_score_updated",
+      "entity_score_updated",
+      "entity_score_updated",
+      "entity_score_updated",
       "origin_calibration_recorded",
       "origin_calibration_recorded",
       "origin_calibration_recorded",
@@ -490,6 +495,7 @@ describe("emitEvent act_tuple_recorded projector", () => {
       // applied_change_committed), which still carry source_act_id = act.id.
       if (
         row.kind === "act_artifact_score_updated" ||
+        row.kind === "entity_score_updated" ||
         row.kind === "candidate_confirmed" ||
         row.kind === "origin_calibration_recorded"
       ) {
@@ -986,13 +992,14 @@ describe("emitEvent act_tuple_recorded projector", () => {
     // SOURCE rows exactly once; the credit fan-out is deterministic across
     // runs because the queue drains to quiescence.
     expect(Object.fromEntries(projected.map((row) => [row.kind, row.n]))).toEqual({
-      act_artifact_score_updated: 3,
+      act_artifact_score_updated: 2,
       action_predicted: 1,
       action_scored: 1,
       applied_change_committed: 1,
       candidate_confirmed: 6,
       coalition_credit_distributed: 1,
       credit_envelope_projected: 1,
+      entity_score_updated: 12,
       origin_calibration_recorded: 10,
       retrieval_binding: 4,
       retrieval_rejected: 1,

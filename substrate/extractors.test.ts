@@ -128,10 +128,11 @@ describe("extractActArtifactScores", () => {
     expect(summary.updated).toBe(1);
 
     const row = db.query("SELECT * FROM act_artifact WHERE id = 'art_x'").get() as Record<string, unknown>;
-    // alpha = 1+3 = 4, beta = 1+0 = 1, score = 4/5 = 0.8.
-    expect(row.posterior_alpha).toBe(4);
+    // Fractional success-band deltas: 0.10 + 0.15 + 0.20 residuals add
+    // 0.6667 + 0.5 + 0.3333 alpha evidence over the Beta(1,1) prior.
+    expect(row.posterior_alpha as number).toBeCloseTo(2.5, 5);
     expect(row.posterior_beta).toBe(1);
-    expect(row.score as number).toBeCloseTo(0.8, 8);
+    expect(row.score as number).toBeCloseTo(2.5 / 3.5, 5);
     // recent_residual_mean = (0.10+0.15+0.20)/3 = 0.15.
     expect(row.recent_residual_mean as number).toBeCloseTo(0.15, 8);
     // Below 20-count promotion threshold → still admitted.

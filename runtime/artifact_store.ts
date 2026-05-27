@@ -36,7 +36,7 @@ import { newId, nowIso } from "./ids";
 import type { EmitEventInput } from "./events";
 import { emitEvent } from "./events";
 import { parseResourceRefs, repoTargetFilesFromResources, resourcesFromTargetFiles, type ResourceRef } from "./resource_uri";
-import { betaMean, betaStreamConfidence, residualToBetaDeltas } from "./posterior";
+import { applyScoredOutcome, residualToBetaDeltas } from "./posterior";
 import { resolveArtifactId } from "../substrate/migration_runner";
 
 export type ActArtifactRow = {
@@ -154,14 +154,6 @@ const QUARANTINE_VIOLATION_THRESHOLD = 5;
 const quarantineResidualThreshold = (): number => QUARANTINE_RESIDUAL_THRESHOLD;
 const quarantineMinObservations = (): number => QUARANTINE_MIN_OBSERVATIONS;
 const quarantineKillCountThreshold = (): number => QUARANTINE_KILL_COUNT_THRESHOLD;
-
-// Canonical Beta math lives in `runtime/posterior.ts`; the local
-// aliases preserve the call-site names so the surrounding diff stays
-// minimal. `recomputeScore` = `betaMean`; `recomputeConfidence` is the
-// stream-form variant (`1 − 1/√(α + β + 1)`), the same shape used in
-// `runtime/credit.ts` for residual-stream updates.
-const recomputeScore = betaMean;
-const recomputeConfidence = betaStreamConfidence;
 
 const clamp01 = (x: number): number => Math.max(0, Math.min(1, x));
 
@@ -441,26 +433,6 @@ export const listArtifactsByRuntime = (
 
 // ── Posterior update ───────────────────────────────────────────────
 
-// Time-decay half-life on Beta posteriors (2026-05-15). Old corroborations
-// shouldn't outweigh fresh contradictions indefinitely — that locks an
-// artifact's posterior into its early history. Apply an exponential decay
-// to (alpha-1, beta-1) before adding the new delta so each prior
-// observation halves its weight every POSTERIOR_HALF_LIFE_MS. The Beta
-// shape is preserved (deltas still produce monotone score moves) but
-// stale evidence gracefully ages out, letting recent reality dominate.
-//
-// alpha=1, beta=1 is the prior — those baselines stay fixed (we only
-// decay the EVIDENCE accumulated on top of the prior).
-const DEFAULT_POSTERIOR_HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-const posteriorHalfLifeMs = (): number => DEFAULT_POSTERIOR_HALF_LIFE_MS;
-
-const decayedEvidence = (currentEvidence: number, dtMs: number): number => {
-  const halfLife = posteriorHalfLifeMs();
-  if (halfLife <= 0 || dtMs <= 0) return currentEvidence;
-  const decayFactor = Math.pow(0.5, dtMs / halfLife);
-  return currentEvidence * decayFactor;
-};
-
 /** Re-export the canonical residual→Beta-delta band map from
  *  `runtime/posterior.ts` (P6 stage B moved the band algebra there to
  *  break the posterior↔artifact_store cycle). Kept as a named re-export
@@ -507,7 +479,14 @@ export const applyResidualOutcome = (
   residual: number,
   ts: string,
   emit?: (event: EmitEventInput) => void,
-  opts?: { weight?: number },
+  opts?: {
+    weight?: number;
+    projectionKey?: string;
+    directiveId?: string;
+    taskId?: string;
+    contextRefs?: string[];
+    scorePayload?: Record<string, JsonValue>;
+  },
 ): ActArtifactRow => {
   // ALIAS_CHAI: resolve OLD → CURRENT before the posterior write so credit
   // cited against a renamed id lands on the CURRENT row, not a phantom.
@@ -519,20 +498,29 @@ export const applyResidualOutcome = (
   const r = clamp01(residual);
   const weight = opts?.weight ?? 1.0;
 
-  const { alphaDelta: rawAlphaDelta, betaDelta: rawBetaDelta } = residualToBetaDeltas(r);
-  const alphaDelta = rawAlphaDelta * weight;
-  const betaDelta  = rawBetaDelta  * weight;
-
-  // Decay accumulated evidence (alpha-1, beta-1 — the prior stays fixed).
-  const prevTs = Date.parse(row.updatedAt);
-  const curTs = Date.parse(ts);
-  const dtMs = Number.isFinite(prevTs) && Number.isFinite(curTs) ? Math.max(0, curTs - prevTs) : 0;
-  const decayedAlphaEvidence = decayedEvidence(Math.max(0, row.posteriorAlpha - 1), dtMs);
-  const decayedBetaEvidence  = decayedEvidence(Math.max(0, row.posteriorBeta  - 1), dtMs);
-  const newAlpha = 1 + decayedAlphaEvidence + alphaDelta;
-  const newBeta  = 1 + decayedBetaEvidence  + betaDelta;
-  const newScore = recomputeScore(newAlpha, newBeta);
-  const newConfidence = recomputeConfidence(newAlpha, newBeta);
+  const scored = applyScoredOutcome(db, {
+    entity_id: artifactId,
+    entity_kind: "act_artifact",
+    residual: r,
+    ts,
+    weight,
+    projection_key: opts?.projectionKey ?? `act_artifact_residual:${artifactId}:${ts}:${row.posteriorAlpha}:${row.posteriorBeta}:${row.recentResidualMean}`,
+    directive_id: opts?.directiveId,
+    task_id: opts?.taskId,
+    context_refs: opts?.contextRefs,
+    initial_posterior: {
+      posterior_alpha: row.posteriorAlpha,
+      posterior_beta: row.posteriorBeta,
+      updated_ts: row.updatedAt,
+    },
+    payload: {
+      ...(opts?.scorePayload ?? {}),
+      projection_source: "applyResidualOutcome",
+      artifact_id: artifactId,
+      artifact_kind: row.kind,
+      weight,
+    },
+  });
   // EMA: weight=1.0 → raw residual (canonical). weight!==1.0 → blend the
   // weighted contribution with a neutral 0.5 background so a bonused
   // observation stays bounded and monotonic in evidence. weight is capped
@@ -542,6 +530,8 @@ export const applyResidualOutcome = (
   const emaContribution = weight === 1.0 ? r : r * wForEma + 0.5 * (1 - wForEma);
   const newEma = EMA_DECAY * row.recentResidualMean + (1 - EMA_DECAY) * emaContribution;
 
+  // Legacy act_artifact score columns are now a projection of scored_entity;
+  // applyScoredOutcome above is the only posterior movement path.
   db.run(
     `UPDATE act_artifact SET
        posterior_alpha = ?, posterior_beta = ?,
@@ -549,7 +539,15 @@ export const applyResidualOutcome = (
        recent_residual_mean = ?,
        updated_at = ?
      WHERE id = ?`,
-    [newAlpha, newBeta, newScore, newConfidence, newEma, ts, artifactId],
+    [
+      scored.posterior_alpha,
+      scored.posterior_beta,
+      scored.score,
+      scored.confidence,
+      newEma,
+      ts,
+      artifactId,
+    ],
   );
 
   // Hole 7 fix: pair every EMA mutation with the demotion check. The

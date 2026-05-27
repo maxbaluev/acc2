@@ -59,6 +59,7 @@ import {
   appliedLessonEffectiveness,
   lessonApplyCandidates,
   promotedKnowledge,
+  universalKnowledgeEntities,
   recipeRegistry,
   actProjectionObservability,
   claudeInlineReadyLeaves,
@@ -1242,6 +1243,13 @@ export const handleRead = (
         const since = typeof arg.since === "string" ? arg.since : undefined;
         const limit = typeof arg.limit === "number" ? arg.limit : undefined;
         return { ok: true, result: promotedKnowledge(db, { origin, since, limit }) as unknown as JsonValue };
+      }
+      case "universal_knowledge_entity_view": {
+        const arg = viewArgs;
+        const entity_id = typeof arg.entity_id === "string" ? arg.entity_id : undefined;
+        const capability = typeof arg.capability === "string" ? arg.capability : undefined;
+        const limit = typeof arg.limit === "number" ? arg.limit : undefined;
+        return { ok: true, result: universalKnowledgeEntities(db, { entity_id, capability, limit }) as unknown as JsonValue };
       }
       case "recipe_registry_view": {
         const arg = viewArgs;

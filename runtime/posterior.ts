@@ -254,10 +254,16 @@ export type ApplyScoredOutcomeInput = {
   outcome?: "succeeded" | "failed";
   /** ISO timestamp of the observation (drives the half-life decay window). */
   ts: string;
+  /** Optional weight scales the residual-derived Beta deltas. */
+  weight?: number;
+  /** Optional seed for first migration of an existing scored row. */
+  initial_posterior?: { posterior_alpha: number; posterior_beta: number; updated_ts?: string };
   /** Optional event-routing context carried onto the entity_score_updated row. */
   directive_id?: string;
   task_id?: string;
   context_refs?: string[];
+  /** Optional caller-supplied idempotency key for the canonical score event. */
+  projection_key?: string;
   /** Optional extra payload fields merged onto the audit event. */
   payload?: Record<string, JsonValue>;
 };
@@ -289,8 +295,13 @@ export const applyScoredOutcome = (
         ? 1
         : 0,
   );
+  const weight = typeof input.weight === "number" && Number.isFinite(input.weight)
+    ? Math.max(0, input.weight)
+    : 1.0;
   const ts = input.ts;
-  const projectionKey = `entity_score:${input.entity_id}:${ts}`;
+  const projectionKey = typeof input.projection_key === "string" && input.projection_key.length > 0
+    ? input.projection_key
+    : `entity_score:${input.entity_id}:${ts}`;
 
   // Idempotency gate — first-wins. A prior entity_score_updated row with
   // the same projection_key means this exact outcome already landed; the
@@ -310,13 +321,26 @@ export const applyScoredOutcome = (
   }
 
   const prior = getScoredEntity(db, input.entity_id);
-  const prevAlpha = prior?.posterior_alpha ?? 1;
-  const prevBeta = prior?.posterior_beta ?? 1;
-  const prevTs = prior ? Date.parse(prior.updated_ts) : NaN;
+  const initial = input.initial_posterior;
+  const initialAlpha = typeof initial?.posterior_alpha === "number" && Number.isFinite(initial.posterior_alpha)
+    ? initial.posterior_alpha
+    : 1;
+  const initialBeta = typeof initial?.posterior_beta === "number" && Number.isFinite(initial.posterior_beta)
+    ? initial.posterior_beta
+    : 1;
+  const priorEvidence = prior ? Math.max(0, prior.posterior_alpha - 1) + Math.max(0, prior.posterior_beta - 1) : -1;
+  const initialEvidence = Math.max(0, initialAlpha - 1) + Math.max(0, initialBeta - 1);
+  const seedFromInitial = initialEvidence > priorEvidence;
+  const prevAlpha = seedFromInitial ? initialAlpha : (prior?.posterior_alpha ?? initialAlpha);
+  const prevBeta = seedFromInitial ? initialBeta : (prior?.posterior_beta ?? initialBeta);
+  const prevUpdatedTs = seedFromInitial ? initial?.updated_ts : (prior?.updated_ts ?? initial?.updated_ts);
+  const prevTs = prevUpdatedTs ? Date.parse(prevUpdatedTs) : NaN;
   const curTs = Date.parse(ts);
   const dtMs = Number.isFinite(prevTs) && Number.isFinite(curTs) ? Math.max(0, curTs - prevTs) : 0;
 
-  const { alphaDelta, betaDelta } = residualToBetaDeltas(residual);
+  const rawDeltas = residualToBetaDeltas(residual);
+  const alphaDelta = rawDeltas.alphaDelta * weight;
+  const betaDelta = rawDeltas.betaDelta * weight;
   // Decay accumulated evidence (α−1, β−1); the prior (1,1) stays fixed.
   const newAlpha = 1 + decayedEvidence(Math.max(0, prevAlpha - 1), dtMs) + alphaDelta;
   const newBeta = 1 + decayedEvidence(Math.max(0, prevBeta - 1), dtMs) + betaDelta;
@@ -351,6 +375,7 @@ export const applyScoredOutcome = (
       entity_id: input.entity_id,
       entity_kind: input.entity_kind,
       residual,
+      weight,
       posterior_alpha: newAlpha,
       posterior_beta: newBeta,
       score: newScore,

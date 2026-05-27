@@ -235,8 +235,6 @@ export const extractGoalShapePredicates = async (
   const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
 
   return extractScoredEntities<ScoreUpdatedRow, ShapeCandidate, GoalShapePredicateSummary>(db, {
-    kind: "goal_shape_predicate",
-    scorer_entity_kind: PREDICATE_KIND,
     yield_every_n: YIELD_EVERY_N,
     // Windowed scan of recent score-update events. Route through the SQL
     // worker-thread pool when present so the heavy time-window read doesn't
@@ -290,9 +288,13 @@ export const extractGoalShapePredicates = async (
       // yield-every-25 cadence and the outcome_linker applies the
       // sample-count threshold gate (preserving skipped_below_threshold
       // counting on the exact same per-candidate loop as before).
-      const candidates: ShapeCandidate[] = [];
+      const candidates = [];
       for (const [goal_shape, { residuals, lastTs }] of byShape.entries()) {
-        candidates.push({ goal_shape, residuals, lastTs });
+        candidates.push({
+          candidate: { goal_shape, residuals, lastTs },
+          entity_kind: PREDICATE_KIND,
+          capability_properties: { measurement: 1, trajectory: 1, predictive: 1 },
+        });
       }
 
       return { candidates, summary };
@@ -301,7 +303,8 @@ export const extractGoalShapePredicates = async (
     // Walk shapes; admit/update rows above threshold. Bounded — the skeleton
     // yields every 25 distinct shapes so the daemon's event loop stays
     // responsive on large windows.
-    outcome_linker: (db2, candidate, summary) => {
+    outcome_linker: (db2, output, summary) => {
+      const candidate = output.candidate;
       if (candidate.residuals.length < MIN_SAMPLE_COUNT) {
         summary.skipped_below_threshold++;
         return;
@@ -323,6 +326,7 @@ export const extractGoalShapePredicates = async (
           std_residual: metrics.std_residual,
           effective_score: metrics.effective_score,
           last_observed_ts: metrics.last_observed_ts,
+          capability_properties: output.capability_properties,
           created,
         },
       });

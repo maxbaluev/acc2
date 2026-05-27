@@ -674,6 +674,17 @@ export const distributeCredit = async (
     return String(target) + role + evidence;
   };
 
+  const canonicalScoreProjectionKey = (artifactId: string, role: string): string => {
+    const evidence = creditMetadata.ownerEvidenceEventId
+      ? ":owner:" + creditMetadata.ownerEvidenceEventId
+      : ":scored:" + params.scored_event_id;
+    return (creditMetadata.sourceActId ?? "artifact_credit") + ":entity_score_updated:" + artifactId + ":" + role + evidence;
+  };
+
+  const ownerScorePayload = (): Record<string, JsonValue> => creditMetadata.ownerEvidenceEventId
+    ? { owner_observed_outcome_event_id: creditMetadata.ownerEvidenceEventId }
+    : {};
+
   const emit = (event: EmitEventInput): string => {
     const payload = jsonObject(event.payload);
     const shouldStamp = creditMetadata.sourceActId && (event.kind === "candidate_confirmed" || event.kind === "candidate_contradicted" || event.kind === "act_artifact_score_updated");
@@ -771,7 +782,14 @@ export const distributeCredit = async (
         params.observed_residual,
         ts,
         (e) => emit(e),
-        { weight: computedActionWeight },
+        {
+          weight: computedActionWeight,
+          projectionKey: canonicalScoreProjectionKey(actionArt!.id, "action"),
+          directiveId: inheritDirectiveId ?? undefined,
+          taskId: inheritTaskId ?? undefined,
+          contextRefs: [params.scored_event_id, params.action_event_id, actionArt!.id],
+          scorePayload: { ...ownerScorePayload(), scored_event_id: params.scored_event_id, artifact_id: actionArt!.id, role: "action", goal_shape: directiveGoalShape },
+        },
       );
     }
     if (!verifierAlreadyCredited) {
@@ -782,7 +800,14 @@ export const distributeCredit = async (
         params.observed_residual,
         ts,
         (e) => emit(e),
-        { weight: computedVerifierWeight },
+        {
+          weight: computedVerifierWeight,
+          projectionKey: canonicalScoreProjectionKey(verifierArt!.id, "verifier"),
+          directiveId: inheritDirectiveId ?? undefined,
+          taskId: inheritTaskId ?? undefined,
+          contextRefs: [params.scored_event_id, params.action_event_id, verifierArt!.id],
+          scorePayload: { ...ownerScorePayload(), scored_event_id: params.scored_event_id, artifact_id: verifierArt!.id, role: "verifier", goal_shape: directiveGoalShape },
+        },
       );
     }
   } else {
@@ -949,7 +974,14 @@ export const distributeCredit = async (
           params.observed_residual,
           ts,
           (e) => emit(e),
-          { weight },
+          {
+            weight,
+            projectionKey: canonicalScoreProjectionKey(targetId, "cited"),
+            directiveId: inheritDirectiveId ?? undefined,
+            taskId: inheritTaskId ?? undefined,
+            contextRefs: [params.scored_event_id, targetId],
+            scorePayload: { ...ownerScorePayload(), scored_event_id: params.scored_event_id, artifact_id: targetId, role: "cited", goal_shape: directiveGoalShape },
+          },
         );
         maybePromote(db, targetId, (e) => emit(e));
         emit({
@@ -1057,6 +1089,23 @@ export const distributeCredit = async (
           scored_event_id: params.scored_event_id,
           polarity: r >= FAILURE_BAND ? "deny" : r <= SUCCESS_BAND ? "assert" : "midband",
         } as JsonValue,
+      });
+      applyScoredOutcome(db, {
+        entity_id: targetId,
+        entity_kind: "knowledge",
+        residual: r,
+        weight: knowledgeWeight,
+        ts,
+        directive_id: inheritDirectiveId,
+        task_id: inheritTaskId,
+        context_refs: [targetId, params.scored_event_id, id],
+        payload: {
+          projection_source: "distributeCredit.knowledge_projection",
+          legacy_projection_event_id: id,
+          scored_event_id: params.scored_event_id,
+          base_shapley_weight: baseWeight,
+          confidence_estimate: confidenceEstimate,
+        },
       });
       // The id is already appended inside emit(); avoid double-pushing.
       void id;
@@ -1179,7 +1228,14 @@ export const distributeCredit = async (
           params.observed_residual,
           ts,
           (e) => emit(e),
-          { weight: 1.0 },
+          {
+            weight: 1.0,
+            projectionKey: canonicalScoreProjectionKey(bundleId, "composer_policy"),
+            directiveId: inheritDirectiveId ?? undefined,
+            taskId: inheritTaskId ?? undefined,
+            contextRefs: [params.scored_event_id, bundleId],
+            scorePayload: { ...ownerScorePayload(), scored_event_id: params.scored_event_id, artifact_id: bundleId, role: "composer_policy", goal_shape: directiveGoalShape, projected_from: "meta_credit", section_name: sectionName },
+          },
         );
         postScore = updated.score;
         postConfidence = updated.confidence;
@@ -1349,7 +1405,14 @@ const recordBrainAccuracy = (db: Database, params: RecordBrainAccuracyParams): v
     accuracyResidual,
     ts,
     (e) => params.emit(e),
-    { weight: 1.0 },
+    {
+      weight: 1.0,
+      projectionKey,
+      directiveId: params.directive_id ?? undefined,
+      taskId: params.task_id ?? undefined,
+      contextRefs: [params.action_predicted_event_id, params.action_scored_event_id, artifactId],
+      scorePayload: { scored_event_id: params.action_scored_event_id, artifact_id: artifactId, role: "brain_accuracy", goal_shape: params.goal_shape },
+    },
   );
   const observationId = params.emit({
     kind: "brain_accuracy_observation",
@@ -1699,17 +1762,20 @@ const priorScoreUpdateExists = (
   opts?: { ignoreOwnerObserved?: boolean },
 ): boolean => {
   const ignoreOwner = opts?.ignoreOwnerObserved !== false; // default true
-  const sql = ignoreOwner
-    ? `SELECT 1 AS x FROM events WHERE kind = 'act_artifact_score_updated'
-         AND json_extract(payload, '$.scored_event_id') = ?
-         AND json_extract(payload, '$.artifact_id') = ?
-         AND (json_extract(payload, '$.owner_observed_outcome_event_id') IS NULL)
-       LIMIT 1`
-    : `SELECT 1 AS x FROM events WHERE kind = 'act_artifact_score_updated'
-         AND json_extract(payload, '$.scored_event_id') = ?
-         AND json_extract(payload, '$.artifact_id') = ?
-       LIMIT 1`;
-  return eventExistsAcrossTiers(db, sql.replace(/^SELECT 1 AS x FROM events WHERE /, "").replace(/\s+LIMIT 1$/, ""), [scoredEventId, artifactId]);
+  const ownerClause = ignoreOwner
+    ? " AND (json_extract(payload, '$.owner_observed_outcome_event_id') IS NULL)"
+    : "";
+  const entityApplied = eventExistsAcrossTiers(
+    db,
+    "kind = 'entity_score_updated' AND json_extract(payload, '$.scored_event_id') = ? AND json_extract(payload, '$.entity_id') = ?" + ownerClause,
+    [scoredEventId, artifactId],
+  );
+  if (entityApplied) return true;
+  return eventExistsAcrossTiers(
+    db,
+    "kind = 'act_artifact_score_updated' AND json_extract(payload, '$.scored_event_id') = ? AND json_extract(payload, '$.artifact_id') = ?" + ownerClause,
+    [scoredEventId, artifactId],
+  );
 };
 
 type ScoredEventLite = {
@@ -1874,6 +1940,7 @@ export const projectActionScoredToCredit = (
     }
     for (const artifactId of citedArtifactIds) {
       const key = projectionKeyFor(projectionAnchorId, artifactId);
+      if (projectionKeyExists(db, "entity_score_updated", key)) continue;
       if (projectionKeyExists(db, "act_artifact_score_updated", key)) continue;
       // Broader guard: distributeCredit may have already emitted an
       // act_artifact_score_updated for this (scored_event_id, artifact_id)
@@ -1928,7 +1995,14 @@ export const projectActionScoredToCredit = (
           residual,
           ts,
           () => { /* downstream emits handled by primitive */ },
-          { weight },
+          {
+            weight,
+            projectionKey: key,
+            directiveId: scoredEvent.directive_id ?? undefined,
+            taskId: scoredEvent.task_id ?? undefined,
+            contextRefs: [scoredEvent.id, projectionAnchorId, artifactId],
+            scorePayload: { scored_event_id: scoredEvent.id, artifact_id: artifactId, role: "cited", goal_shape: projectorGoalShape, projected_from: "action_scored_universal_projector" },
+          },
         );
         postScore = updated.score;
         postConfidence = updated.confidence;
@@ -2042,7 +2116,14 @@ export const projectActionScoredToCredit = (
             directive_id: e.directive_id ?? scoredEvent.directive_id,
             task_id: e.task_id ?? scoredEvent.task_id,
           }),
-          { weight: 1.0 },
+          {
+            weight: 1.0,
+            projectionKey: metaProjectionKey,
+            directiveId: scoredEvent.directive_id ?? undefined,
+            taskId: scoredEvent.task_id ?? undefined,
+            contextRefs: [scoredEvent.id, bundleId],
+            scorePayload: { scored_event_id: scoredEvent.id, artifact_id: bundleId, role: "composer_policy", goal_shape: universalGoalShape, projected_from: "meta_credit", section_name: sectionName },
+          },
         );
         postScore = updated.score;
         postConfidence = updated.confidence;

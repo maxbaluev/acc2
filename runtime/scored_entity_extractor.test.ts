@@ -70,12 +70,17 @@ const countScoreEvents = (db: ReturnType<typeof openDb>): number =>
     .query(`SELECT COUNT(*) AS n FROM events WHERE kind = 'entity_score_updated'`)
     .get() as { n: number }).n;
 
+const latestScorePayload = (db: ReturnType<typeof openDb>, entityId: string): Record<string, unknown> => {
+  const row = db
+    .query(`SELECT payload FROM events WHERE kind = 'entity_score_updated' AND json_extract(payload, '$.entity_id') = ? ORDER BY ts DESC, rowid DESC LIMIT 1`)
+    .get(entityId) as { payload: string } | null;
+  return row ? (JSON.parse(row.payload) as Record<string, unknown>) : {};
+};
+
 /** A generic config: scan recent events, count by kind, score one entity per
  *  distinct kind via applyScoredOutcome (which writes the scored_entity row
  *  AND emits the entity_score_updated observation event). */
 const makeConfig = (cap: number): ScoredEntityExtractorConfig<EventRow, Candidate, Summary> => ({
-  kind: "test_kind_count",
-  scorer_entity_kind: "test_kind_count",
   source_query: {
     sql: `SELECT id, kind, directive_id FROM events
             WHERE directive_id IS NOT NULL
@@ -88,22 +93,25 @@ const makeConfig = (cap: number): ScoredEntityExtractorConfig<EventRow, Candidat
     const summary: Summary = { rows_scanned: rows.length, candidates_built: 0, scored: 0 };
     const byKind = new Map<string, number>();
     for (const r of rows) byKind.set(r.kind, (byKind.get(r.kind) ?? 0) + 1);
-    const candidates: Candidate[] = Array.from(byKind.entries()).map(([kind, count]) => ({
+    const candidates = Array.from(byKind.entries()).map(([kind, count]) => ({
+      candidate: { entity_id: `tk_${kind}`, kind, count },
       entity_id: `tk_${kind}`,
-      kind,
-      count,
+      entity_kind: "test_kind_count",
+      capability_properties: { measurement: 1, trajectory: 1, observed_kind: kind },
     }));
     summary.candidates_built = candidates.length;
     return { candidates, summary };
   },
-  outcome_linker: (db, candidate, summary) => {
+  outcome_linker: (db, output, summary) => {
+    const candidate = output.candidate;
     // Score the entity via the canonical primitive. Residual derived from the
     // count so we have a deterministic posterior.
     applyScoredOutcome(db, {
-      entity_id: candidate.entity_id,
-      entity_kind: "test_kind_count",
+      entity_id: output.entity_id ?? candidate.entity_id,
+      entity_kind: output.entity_kind ?? "test_kind_count",
       residual: candidate.count >= 3 ? 0.1 : 0.9,
       ts: tickTs(),
+      payload: { capability_properties: output.capability_properties },
     });
     summary.scored++;
   },
@@ -136,6 +144,13 @@ describe("extractScoredEntities", () => {
       .get() as { score: number };
     expect(alpha.score).toBeGreaterThan(0.5);
     expect(beta.score).toBeLessThan(0.5);
+
+    const alphaPayload = latestScorePayload(db, "tk_alpha_event");
+    expect(alphaPayload.capability_properties).toEqual({
+      measurement: 1,
+      trajectory: 1,
+      observed_kind: "alpha_event",
+    });
   });
 
   test("bounded scan: the LIMIT cap is honored — rows beyond the cap are not scanned", async () => {

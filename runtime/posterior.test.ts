@@ -203,6 +203,35 @@ describe("runtime/posterior — applyScoredOutcome canonical primitive", () => {
     expect(countEntityScoreEvents(db, "ent_idem")).toBe(1);
   });
 
+  test("caller-supplied projection_key controls idempotency and audit metadata", () => {
+    const db = openDb(":memory:");
+    const first = applyScoredOutcome(db, {
+      entity_id: "ent_projection",
+      entity_kind: "act_artifact",
+      residual: 0,
+      ts: "2026-05-27T02:10:00.000Z",
+      projection_key: "artifact_credit:scored_1:ent_projection:action",
+      payload: { scored_event_id: "scored_1", artifact_id: "ent_projection", role: "action" },
+    });
+    const second = applyScoredOutcome(db, {
+      entity_id: "ent_projection",
+      entity_kind: "act_artifact",
+      residual: 1,
+      ts: "2026-05-27T02:11:00.000Z",
+      projection_key: "artifact_credit:scored_1:ent_projection:action",
+      payload: { scored_event_id: "scored_1", artifact_id: "ent_projection", role: "action" },
+    });
+    expect(second.posterior_alpha).toBe(first.posterior_alpha);
+    expect(second.posterior_beta).toBe(first.posterior_beta);
+    const row = db.query<{ k: string; scored: string; role: string }, []>(
+      "SELECT json_extract(payload, '$.projection_key') AS k, json_extract(payload, '$.scored_event_id') AS scored, json_extract(payload, '$.role') AS role FROM events WHERE kind = 'entity_score_updated'",
+    ).get()!;
+    expect(row.k).toBe("artifact_credit:scored_1:ent_projection:action");
+    expect(row.scored).toBe("scored_1");
+    expect(row.role).toBe("action");
+    expect(countEntityScoreEvents(db, "ent_projection")).toBe(1);
+  });
+
   test("outcome shorthand maps succeeded→residual 0, failed→residual 1", () => {
     const db = openDb(":memory:");
     const win = applyScoredOutcome(db, {
@@ -231,5 +260,21 @@ describe("runtime/posterior — applyScoredOutcome canonical primitive", () => {
     // Two distinct observations → two audit rows, posterior moved twice.
     expect(countEntityScoreEvents(db, "ent_seq")).toBe(2);
     expect(after.posterior_alpha).toBeGreaterThan(1 + residualToBetaDeltas(0).alphaDelta);
+  });
+
+  test("weight scales posterior deltas and initial_posterior seeds migrated rows", () => {
+    const db = openDb(":memory:");
+    const row = applyScoredOutcome(db, {
+      entity_id: "ent_weighted",
+      entity_kind: "act_artifact",
+      residual: 0,
+      weight: 2,
+      initial_posterior: { posterior_alpha: 4, posterior_beta: 2, updated_ts: "2026-05-27T04:00:00.000Z" },
+      ts: "2026-05-27T04:00:00.000Z",
+    });
+
+    expect(row.posterior_alpha).toBeCloseTo(6, 10);
+    expect(row.posterior_beta).toBeCloseTo(2, 10);
+    expect(row.score).toBeCloseTo(6 / 8, 10);
   });
 });

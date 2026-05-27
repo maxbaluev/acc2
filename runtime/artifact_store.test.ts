@@ -19,6 +19,7 @@ import {
   REHABILITATION_CONTROLLED_INVOCATIONS_FOR_TEST,
 } from "./artifact_store";
 import { nowIso } from "./ids";
+import { getScoredEntity } from "./posterior";
 import type { Database } from "bun:sqlite";
 
 afterAll(() => closeDb());
@@ -111,6 +112,38 @@ describe("applyResidualOutcome", () => {
     expect(updated.posteriorBeta).toBeGreaterThan(1);
     expect(updated.score).toBeLessThan(0.5);
     expect(updated.recentResidualMean).toBeGreaterThan(0);
+  });
+
+  test("delegates posterior movement to applyScoredOutcome and projects legacy artifact score columns", () => {
+    const db = openDb(":memory:");
+    insertSampleBunArtifact(db, "art_one_path", { initialAlpha: 4, initialBeta: 2, score: 4 / 6, confidence: 0.6 });
+    const updated = applyResidualOutcome(db, "art_one_path", 0, "2026-05-27T10:00:00.000Z", undefined, {
+      projectionKey: "artifact_credit:score_evt:art_one_path:action",
+      scorePayload: { scored_event_id: "score_evt", artifact_id: "art_one_path", role: "action" },
+    });
+    const scored = getScoredEntity(db, "art_one_path");
+
+    expect(scored).not.toBeNull();
+    expect(scored!.entity_kind).toBe("act_artifact");
+    expect(updated.posteriorAlpha).toBeCloseTo(scored!.posterior_alpha, 10);
+    expect(updated.posteriorBeta).toBeCloseTo(scored!.posterior_beta, 10);
+    expect(updated.score).toBeCloseTo(scored!.score, 10);
+    expect(updated.confidence).toBeCloseTo(scored!.confidence, 10);
+
+    const entityEvents = db
+      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM events WHERE kind = 'entity_score_updated'")
+      .get()!.n;
+    const legacyEvents = db
+      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM events WHERE kind = 'act_artifact_score_updated'")
+      .get()!.n;
+    expect(entityEvents).toBe(1);
+    expect(legacyEvents).toBe(0);
+    const event = db.query<{ key: string; scored: string; role: string }, []>(
+      "SELECT json_extract(payload, '$.projection_key') AS key, json_extract(payload, '$.scored_event_id') AS scored, json_extract(payload, '$.role') AS role FROM events WHERE kind = 'entity_score_updated'",
+    ).get()!;
+    expect(event.key).toBe("artifact_credit:score_evt:art_one_path:action");
+    expect(event.scored).toBe("score_evt");
+    expect(event.role).toBe("action");
   });
 
   test("repeated events drive the EMA toward the steady-state residual", () => {

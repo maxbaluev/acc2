@@ -1573,6 +1573,75 @@ CREATE VIEW IF NOT EXISTS promoted_knowledge_view AS
 // and validation fields so Tier-0 replay learns skill boundaries instead of matching
 // only on goal_shape × topology_signature (per SCALAR skill-library SOTA, brain
 // dispatch FNJJPAC55H69379F562DMQK1FM 2026-05-16).
+
+// universal_knowledge_entity_view \u2014 U1 additive projection. Existing rows keep
+// their event/table homes; this read-only projection exposes one universal
+// entity surface differentiated by open capability_properties and joined to the
+// canonical scored_entity score lineage.
+const VIEW_UNIVERSAL_KNOWLEDGE_ENTITY = `
+CREATE VIEW IF NOT EXISTS universal_knowledge_entity_view AS
+  WITH event_entities AS (
+    SELECT
+      CASE WHEN e.kind = 'knowledge_promoted' THEN COALESCE(json_extract(e.payload, '$.candidate_id'), json_extract(e.context_refs, '$[0]'), e.id) ELSE e.id END AS entity_id,
+      e.id AS source_event_id,
+      e.ts,
+      e.directive_id,
+      e.task_id,
+      e.substrate_origin,
+      e.kind AS source_kind,
+      COALESCE(json_extract(e.payload, '$.text'), json_extract(e.payload, '$.claim'), json_extract(e.payload, '$.summary'), json_extract(e.payload, '$.insight'), json_extract(e.payload, '$.synthesized_text')) AS text,
+      json_patch(
+        json_object(
+          'source_kind', e.kind,
+          'candidate', CASE WHEN e.kind = 'knowledge_candidate' THEN 1 ELSE 0 END,
+          'promoted', CASE WHEN e.kind = 'knowledge_promoted' THEN 1 ELSE 0 END,
+          'executable', CASE WHEN e.kind IN ('act_artifact_candidate', 'code_artifact_candidate') OR json_type(e.payload, '$.runtime') IS NOT NULL OR json_type(e.payload, '$.action_handle') IS NOT NULL THEN 1 ELSE 0 END,
+          'replayable', CASE WHEN COALESCE(json_extract(e.payload, '$.recipe_shape.enabled'), 0) IN (1, 'true') OR json_type(e.payload, '$.topology_signature') IS NOT NULL THEN 1 ELSE 0 END,
+          'correction', CASE WHEN e.kind IN ('lesson_extracted', 'contract_amendment_proposed') OR json_type(e.payload, '$.correction') IS NOT NULL THEN 1 ELSE 0 END,
+          'trajectory', CASE WHEN e.kind IN ('task_node_opened', 'task_edge_recorded', 'task_committed', 'action_predicted', 'action_scored') OR json_type(e.payload, '$.trajectory') IS NOT NULL THEN 1 ELSE 0 END,
+          'measurement', CASE WHEN e.kind IN ('action_scored', 'entity_score_updated') OR json_type(e.payload, '$.residual') IS NOT NULL OR json_type(e.payload, '$.metric_name') IS NOT NULL THEN 1 ELSE 0 END
+        ),
+        CASE WHEN json_type(e.payload, '$.capability_properties') = 'object' THEN json_extract(e.payload, '$.capability_properties') ELSE json('{}') END
+      ) AS capability_properties,
+      e.payload,
+      e.context_refs
+    FROM events e
+    WHERE e.kind IN ('knowledge_candidate', 'knowledge_promoted', 'knowledge_synthesized', 'lesson_extracted', 'contract_amendment_proposed', 'act_artifact_candidate', 'code_artifact_candidate', 'task_node_opened', 'task_edge_recorded', 'task_committed', 'action_predicted', 'action_scored', 'entity_score_updated')
+  ),
+  latest_score_events AS (
+    SELECT
+      json_extract(e.payload, '$.entity_id') AS entity_id,
+      e.id AS score_event_id,
+      e.ts AS score_event_ts,
+      ROW_NUMBER() OVER (PARTITION BY json_extract(e.payload, '$.entity_id') ORDER BY e.ts DESC, e.rowid DESC) AS rn
+    FROM events e
+    WHERE e.kind = 'entity_score_updated' AND json_extract(e.payload, '$.entity_id') IS NOT NULL
+  )
+  SELECT
+    ee.entity_id,
+    ee.source_event_id,
+    ee.ts,
+    ee.directive_id,
+    ee.task_id,
+    ee.substrate_origin,
+    ee.source_kind,
+    COALESCE(se.entity_kind, ee.source_kind) AS entity_kind,
+    ee.text,
+    ee.capability_properties,
+    se.posterior_alpha,
+    se.posterior_beta,
+    COALESCE(se.score, CAST(json_extract(ee.payload, '$.score') AS REAL)) AS score,
+    COALESCE(se.confidence, CAST(json_extract(ee.payload, '$.confidence') AS REAL)) AS confidence,
+    se.updated_ts AS score_updated_ts,
+    lse.score_event_id,
+    json_object('scored_entity_id', se.entity_id, 'score_event_id', lse.score_event_id, 'score_event_ts', lse.score_event_ts, 'source', CASE WHEN se.entity_id IS NOT NULL THEN 'scored_entity' ELSE 'payload_projection' END) AS score_lineage,
+    ee.payload,
+    ee.context_refs
+  FROM event_entities ee
+  LEFT JOIN scored_entity se ON se.entity_id = ee.entity_id
+  LEFT JOIN latest_score_events lse ON lse.entity_id = ee.entity_id AND lse.rn = 1;
+`;
+
 const VIEW_RECIPE_REGISTRY = `
 CREATE VIEW IF NOT EXISTS recipe_registry_view AS
   WITH recipes AS (
@@ -4582,6 +4651,7 @@ export const VIEW_NAMES = [
   "pending_owner_decision_queue_view",
   "pending_owner_decision_queue_live_view",
   "promoted_knowledge_view",
+  "universal_knowledge_entity_view",
   "irreversible_effects_view",
   "low_risk_inline_patterns_view",
   "act_projection_observability_view",
@@ -4671,6 +4741,7 @@ const VIEW_DDL: readonly string[] = [
   VIEW_IRREVERSIBLE_EFFECTS,
   VIEW_LOW_RISK_INLINE_PATTERNS,
   VIEW_PROMOTED_KNOWLEDGE,
+  VIEW_UNIVERSAL_KNOWLEDGE_ENTITY,
   // top_laws_view depends on promoted_knowledge_view.
   VIEW_TOP_LAWS,
   VIEW_RECIPE_REGISTRY,
@@ -4752,6 +4823,7 @@ export const runViews = (db: Database): void => {
   db.exec(VIEW_IRREVERSIBLE_EFFECTS);
   db.exec(VIEW_LOW_RISK_INLINE_PATTERNS);
   db.exec(VIEW_PROMOTED_KNOWLEDGE);
+  db.exec(VIEW_UNIVERSAL_KNOWLEDGE_ENTITY);
   // top_laws_view depends on promoted_knowledge_view.
   db.exec(VIEW_TOP_LAWS);
   db.exec(VIEW_RECIPE_REGISTRY);
@@ -6756,6 +6828,66 @@ export type PromotedKnowledgeFilter = {
   limit?: number;
 };
 
+export type UniversalKnowledgeEntityRow = {
+  entity_id: string;
+  source_event_id: string;
+  ts: string;
+  directive_id: string | null;
+  task_id: string | null;
+  substrate_origin: string | null;
+  source_kind: string;
+  entity_kind: string;
+  text: string | null;
+  capability_properties: Record<string, unknown>;
+  posterior_alpha: number | null;
+  posterior_beta: number | null;
+  score: number | null;
+  confidence: number | null;
+  score_updated_ts: string | null;
+  score_event_id: string | null;
+  score_lineage: Record<string, unknown>;
+  payload: Record<string, unknown>;
+  context_refs: string[];
+};
+
+export type UniversalKnowledgeEntityFilter = { entity_id?: string; capability?: string; limit?: number };
+
+export const universalKnowledgeEntities = (db: Database, filter: UniversalKnowledgeEntityFilter = {}): UniversalKnowledgeEntityRow[] => {
+  const wheres: string[] = [];
+  const params: SQLQueryBindings[] = [];
+  if (filter.entity_id) { wheres.push("entity_id = ?"); params.push(filter.entity_id); }
+  if (filter.capability) { wheres.push("COALESCE(json_extract(capability_properties, ?), 0) IN (1, 'true')"); params.push(`$.${filter.capability}`); }
+  const whereSql = wheres.length === 0 ? "" : `WHERE ${wheres.join(" AND ")}`;
+  const limitSql = `LIMIT ${resolveDefaultLimit(filter.limit, 200, { envVar: "ACC2_UNIVERSAL_ENTITY_DEFAULT_LIMIT" })}`;
+  const rows = db.query(
+    `SELECT entity_id, source_event_id, ts, directive_id, task_id, substrate_origin, source_kind, entity_kind, text, capability_properties, posterior_alpha, posterior_beta, score, confidence, score_updated_ts, score_event_id, score_lineage, payload, context_refs
+       FROM universal_knowledge_entity_view
+       ${whereSql}
+       ORDER BY ts DESC, source_event_id DESC
+       ${limitSql}`,
+  ).all(...params) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    entity_id: r.entity_id as string,
+    source_event_id: r.source_event_id as string,
+    ts: r.ts as string,
+    directive_id: (r.directive_id as string | null) ?? null,
+    task_id: (r.task_id as string | null) ?? null,
+    substrate_origin: (r.substrate_origin as string | null) ?? null,
+    source_kind: r.source_kind as string,
+    entity_kind: r.entity_kind as string,
+    text: (r.text as string | null) ?? null,
+    capability_properties: parseJson<Record<string, unknown>>(r.capability_properties ?? "{}"),
+    posterior_alpha: (r.posterior_alpha as number | null) ?? null,
+    posterior_beta: (r.posterior_beta as number | null) ?? null,
+    score: (r.score as number | null) ?? null,
+    confidence: (r.confidence as number | null) ?? null,
+    score_updated_ts: (r.score_updated_ts as string | null) ?? null,
+    score_event_id: (r.score_event_id as string | null) ?? null,
+    score_lineage: parseJson<Record<string, unknown>>(r.score_lineage ?? "{}"),
+    payload: parseJson<Record<string, unknown>>(r.payload ?? "{}"),
+    context_refs: parseJson<string[]>(r.context_refs ?? "[]"),
+  }));
+};
 export type RecipeRegistryRow = {
   recipe_id: string;
   id: string;

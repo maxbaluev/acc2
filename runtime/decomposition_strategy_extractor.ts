@@ -569,8 +569,6 @@ export const extractDecompositionStrategy = async (
   const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
 
   return extractScoredEntities<DirectiveRow, ShapeCandidate, DecompositionStrategySummary>(db, {
-    kind: "decomposition_strategy",
-    scorer_entity_kind: PREDICATE_KIND,
     yield_every_n: YIELD_EVERY_N,
     // Pull the most-recent task_closure_audited per directive in the
     // window. A directive can be re-audited; we take the latest closure.
@@ -667,13 +665,18 @@ export const extractDecompositionStrategy = async (
       // directive loop, before the per-shape loop).
       summary.shapes_seen = byShape.size;
 
-      const candidates: ShapeCandidate[] = Array.from(byShape.entries()).map(
-        ([shape, aggregate]) => ({ shape, aggregate }),
+      const candidates = Array.from(byShape.entries()).map(
+        ([shape, aggregate]) => ({
+          candidate: { shape, aggregate },
+          entity_kind: PREDICATE_KIND,
+          capability_properties: { measurement: 1, trajectory: 1, predictive: 1 },
+        }),
       );
       return { candidates, summary };
     },
 
-    outcome_linker: (db2, candidate, summary) => {
+    outcome_linker: (db2, output, summary) => {
+      const candidate = output.candidate;
       const { shape, aggregate: agg } = candidate;
       if (agg.fingerprints.length < MIN_SAMPLE_COUNT) {
         summary.skipped_below_threshold++;
@@ -699,6 +702,7 @@ export const extractDecompositionStrategy = async (
           avg_max_depth: metrics.avg_max_depth,
           avg_total_nodes: metrics.avg_total_nodes,
           last_observed_ts: metrics.last_observed_ts,
+          capability_properties: output.capability_properties,
           created,
         },
       });
