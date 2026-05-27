@@ -334,6 +334,30 @@ CREATE TABLE IF NOT EXISTS artifact_kind_metadata (
 CREATE INDEX IF NOT EXISTS idx_artifact_kind_metadata_needs_strategic
   ON artifact_kind_metadata(needs_strategic_grounding);
 
+-- ── scored_entity (P6 scoring consolidation, amendment 5XRDMG6G, stage A) ──
+-- ADDITIVE ONLY. The consolidation target for the substrate's ≥4 parallel
+-- Beta-posterior update mechanisms: every posterior-scored learnable thing
+-- (act_artifact, knowledge candidate, recipe, causal edge, motif, …)
+-- becomes ONE row here, keyed by its stable id, tagged with a free-string
+-- entity_kind (open vocabulary — admitted, not enumerated). The score
+-- columns mirror act_artifact's (posterior_alpha / posterior_beta / score /
+-- confidence) so a later migration stage can fold the existing rows in.
+-- ONE primitive (runtime/posterior.applyScoredOutcome) upserts this row and
+-- emits ONE entity_score_updated audit event. NOTHING reads or writes this
+-- table yet — consumers migrate onto it in later stages. CREATE TABLE IF
+-- NOT EXISTS keeps runSchema idempotent on fresh + existing DBs.
+CREATE TABLE IF NOT EXISTS scored_entity (
+  entity_id        TEXT PRIMARY KEY,
+  entity_kind      TEXT NOT NULL,
+  posterior_alpha  REAL NOT NULL DEFAULT 1.0,
+  posterior_beta   REAL NOT NULL DEFAULT 1.0,
+  score            REAL NOT NULL DEFAULT 0.5,
+  confidence       REAL NOT NULL DEFAULT 0.3,
+  updated_ts       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scored_entity_kind  ON scored_entity(entity_kind);
+CREATE INDEX IF NOT EXISTS idx_scored_entity_score ON scored_entity(entity_kind, score DESC);
+
 -- ── Universal resource governor accounting (additive, migration-safe) ──
 -- The governor (runtime/resource_governor.ts) arbitrates fair, bounded
 -- multi-actor resource sharing so N terminals × M brains share one daemon

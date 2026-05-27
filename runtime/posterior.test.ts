@@ -3,13 +3,17 @@
 // evidence-form) so a future refactor cannot silently swap one for the
 // other and quietly bias every score surface in the substrate.
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 
+import { closeDb, openDb } from "../substrate/db";
+import { residualToBetaDeltas } from "./artifact_store";
 import {
+  applyScoredOutcome,
   betaConfidence,
   betaEvidenceConfidence,
   betaMean,
   betaStreamConfidence,
+  getScoredEntity,
   scoreFor,
   updateBetaPosterior,
 } from "./posterior";
@@ -83,5 +87,119 @@ describe("runtime/posterior — canonical Beta math", () => {
     expect(c.score).toBe(1);
     expect(c.confidence).toBeGreaterThan(0);
     expect(c.confidence).toBeLessThanOrEqual(1);
+  });
+});
+
+// ── Canonical scored-entity primitive (amendment 5XRDMG6G, stage A) ──
+// Verifies the consolidation primitive upserts + audits, is idempotent on
+// (entity, ts), and reuses the EXISTING posterior formulas verbatim.
+describe("runtime/posterior — applyScoredOutcome canonical primitive", () => {
+  afterAll(() => closeDb());
+  beforeEach(() => closeDb());
+
+  const countEntityScoreEvents = (db: ReturnType<typeof openDb>, entityId: string): number =>
+    (db
+      .query<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = 'entity_score_updated' AND json_extract(payload, '$.entity_id') = ?",
+      )
+      .get(entityId)?.n) ?? 0;
+
+  test("applyScoredOutcome upserts a scored_entity row and emits entity_score_updated", () => {
+    const db = openDb(":memory:");
+    expect(getScoredEntity(db, "ent_a")).toBeNull();
+
+    const result = applyScoredOutcome(db, {
+      entity_id: "ent_a",
+      entity_kind: "act_artifact",
+      residual: 0,
+      ts: "2026-05-27T00:00:00.000Z",
+    });
+
+    const row = getScoredEntity(db, "ent_a");
+    expect(row).not.toBeNull();
+    expect(row!.entity_kind).toBe("act_artifact");
+    expect(row!.posterior_alpha).toBeGreaterThan(1); // success bumped α
+    expect(row!.posterior_beta).toBe(1);
+    expect(result.score).toBe(row!.score);
+
+    expect(countEntityScoreEvents(db, "ent_a")).toBe(1);
+  });
+
+  test("score/confidence match the existing posterior formulas for the same α/β", () => {
+    const db = openDb(":memory:");
+    const ts = "2026-05-27T01:00:00.000Z";
+    // success outcome (residual 0) from the Beta(1,1) prior → the same
+    // residualToBetaDeltas band logic artifact_store / applyResidualOutcome use.
+    const { alphaDelta, betaDelta } = residualToBetaDeltas(0);
+    const expectedAlpha = 1 + alphaDelta; // no prior evidence to decay
+    const expectedBeta = 1 + betaDelta;
+
+    const row = applyScoredOutcome(db, {
+      entity_id: "ent_formula",
+      entity_kind: "knowledge_candidate",
+      residual: 0,
+      ts,
+    });
+
+    expect(row.posterior_alpha).toBeCloseTo(expectedAlpha, 10);
+    expect(row.posterior_beta).toBeCloseTo(expectedBeta, 10);
+    // score == betaMean, confidence == betaStreamConfidence (artifact_store's
+    // recomputeScore / recomputeConfidence) — reused, not reinvented.
+    expect(row.score).toBeCloseTo(betaMean(expectedAlpha, expectedBeta), 10);
+    expect(row.confidence).toBeCloseTo(betaStreamConfidence(expectedAlpha, expectedBeta), 10);
+  });
+
+  test("repeated identical outcome (same entity + ts) is idempotent", () => {
+    const db = openDb(":memory:");
+    const ts = "2026-05-27T02:00:00.000Z";
+
+    const first = applyScoredOutcome(db, {
+      entity_id: "ent_idem",
+      entity_kind: "recipe",
+      residual: 1,
+      ts,
+    });
+    const second = applyScoredOutcome(db, {
+      entity_id: "ent_idem",
+      entity_kind: "recipe",
+      residual: 1,
+      ts,
+    });
+
+    // No second posterior movement, no duplicate audit event.
+    expect(second.posterior_alpha).toBe(first.posterior_alpha);
+    expect(second.posterior_beta).toBe(first.posterior_beta);
+    expect(second.score).toBe(first.score);
+    expect(countEntityScoreEvents(db, "ent_idem")).toBe(1);
+  });
+
+  test("outcome shorthand maps succeeded→residual 0, failed→residual 1", () => {
+    const db = openDb(":memory:");
+    const win = applyScoredOutcome(db, {
+      entity_id: "ent_win",
+      entity_kind: "causal_edge",
+      outcome: "succeeded",
+      ts: "2026-05-27T03:00:00.000Z",
+    });
+    const loss = applyScoredOutcome(db, {
+      entity_id: "ent_loss",
+      entity_kind: "causal_edge",
+      outcome: "failed",
+      ts: "2026-05-27T03:00:00.000Z",
+    });
+    expect(win.posterior_alpha).toBeGreaterThan(win.posterior_beta);
+    expect(loss.posterior_beta).toBeGreaterThan(loss.posterior_alpha);
+  });
+
+  test("a later distinct outcome compounds onto the same entity row", () => {
+    const db = openDb(":memory:");
+    const t1 = "2026-05-27T04:00:00.000Z";
+    const t2 = "2026-05-27T05:00:00.000Z";
+    applyScoredOutcome(db, { entity_id: "ent_seq", entity_kind: "act_artifact", residual: 0, ts: t1 });
+    const after = applyScoredOutcome(db, { entity_id: "ent_seq", entity_kind: "act_artifact", residual: 0, ts: t2 });
+
+    // Two distinct observations → two audit rows, posterior moved twice.
+    expect(countEntityScoreEvents(db, "ent_seq")).toBe(2);
+    expect(after.posterior_alpha).toBeGreaterThan(1 + residualToBetaDeltas(0).alphaDelta);
   });
 });

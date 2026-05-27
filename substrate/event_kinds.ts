@@ -407,6 +407,21 @@ export const EVENT_KINDS = {
   // PROJECTION of CreditEnvelope, not an independent credit driver
   // (amendment 4509YBMC): posterior-movement audit surface of the envelope.
   act_artifact_score_updated:              { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
+  // P6 scoring consolidation (brain amendment 5XRDMG6G, stage A — ADDITIVE).
+  // The single audit surface for the consolidated scoring primitive
+  // (runtime/posterior.applyScoredOutcome): one entity_score_updated row per
+  // posterior movement on a scored_entity row, idempotent on
+  // payload.projection_key = entity_score:{entity_id}:{ts}. The end state of
+  // P6 is ONE scored_entity row updated by ONE primitive audited by THIS one
+  // event — replacing the parallel act_artifact_score_updated /
+  // code_artifact_score_updated / candidate_confirmed / candidate_contradicted
+  // families. Stage A only REGISTERS the kind; no producer is migrated and no
+  // existing kind is removed in this stage. Not embeddable (numeric payload,
+  // no retrievable text); not health_metric / mirror_inline / narrative until
+  // a consumer actually drives it (avoids flooding the tail with an unused
+  // primitive's rows). Payload: { projection_key, entity_id, entity_kind,
+  // residual, posterior_alpha, posterior_beta, score, confidence }.
+  entity_score_updated:                    { producer: "substrate", embeddable: false, mirror_inline: false, health_metric: false, narrative: false },
   // T0.2 universal projection — emit-boundary projector for action_scored
   // walks source_act_event_id → action_predicted's cited_artifact_ids and
   // emits act_artifact_score_updated per cited artifact. Errors during
