@@ -226,6 +226,14 @@ const buildImplementationTaskPayload = (row: PendingContractAmendmentRow): JsonV
     predicate: row.predicate ?? null,
     source_proposal_id: row.proposal_id,
     requires_deliverable: true,
+    // Executor-selection (increment 2/2): a contract-amendment apply leaf is an
+    // implementation/apply leaf, so dispatch's scored executor_selection (or
+    // its deterministic structural fallback) routes it to the substrate-spawned
+    // Claude-Code executor. The hint is advisory — the scored policy still wins
+    // when one is admitted — but it makes the apply-routing intent explicit in
+    // the synthetic task so executor selection never has to infer it from a
+    // missing target set.
+    executor_hint: "claude_agent",
     expected_outputs: [
       { kind: "applied_change_committed", source_event_id: row.proposal_id },
     ],

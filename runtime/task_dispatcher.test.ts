@@ -1076,6 +1076,144 @@ describe("task_dispatcher", () => {
   });
 });
 
+// Increment 2/2 — CC bridge executor-selection + apply-routing wiring.
+// (amendments TRJRC1NZ, BDAXGS1M, 3VXVRDVK, 0MD1R9T8, AW5AY83Z, TP1BT1CN)
+describe("task_dispatcher CC executor route (increment 2/2)", () => {
+  // Seed a directive + an APPLY leaf task carrying the explicit executor_hint
+  // so the decider's executor-selection routes it to the claude_agent lane.
+  const seedApplyLeaf = (db: Database): { directiveId: string; taskId: string } => {
+    const directiveId = newId();
+    const taskId = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: { directive_text: "apply the amendment edits", lifecycle: "finite" } as JsonValue,
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      parent_task_id: null,
+      payload: {
+        goal: "apply the amendment edits to runtime/foo.ts",
+        // contract-amendment apply-leaf markers → executor_selection → claude_agent
+        executor_hint: "claude_agent",
+        source_proposal_id: "prop_xyz",
+        requires_deliverable: true,
+        target_files: ["runtime/foo.ts"],
+        lifecycle: "finite",
+      } as JsonValue,
+    });
+    return { directiveId, taskId };
+  };
+
+  test("claude_agent route spawns the CC bridge via the mock seam (no real subprocess)", async () => {
+    const db = openDb(":memory:");
+    const { directiveId, taskId } = seedApplyLeaf(db);
+    const ready = readyTasks(db, directiveId);
+    const task = ready.find((r) => r.id === taskId)!;
+    expect(task).toBeDefined();
+
+    // Spy ccBridge — proves the dispatcher routed through the CC executor seam
+    // WITHOUT launching any real `claude`/`opencode` subprocess.
+    let ccCalls = 0;
+    let opencodeCalls = 0;
+    const ccSpy = async (req: BridgeRequest, _db: Database): Promise<BridgeResult> => {
+      ccCalls += 1;
+      expect(req.taskId).toBe(taskId);
+      expect(req.directiveId).toBe(directiveId);
+      // The CC bridge would emit its own cc_dispatched row; emulate so the
+      // dispatch window has the lifecycle marker.
+      emitEvent(_db, {
+        kind: "cc_dispatched",
+        substrate_origin: "claude_code",
+        directive_id: req.directiveId,
+        task_id: req.taskId,
+        payload: { dispatch_id: req.dispatchId, engine: "claude_code" } as JsonValue,
+        invoker: "claude_code",
+      });
+      return { ok: true, final_response: "cc mock applied", usage: { tokens: 0 }, emitted_event_ids: [] };
+    };
+    const opencodeSpy = async (_req: BridgeRequest, _db: Database): Promise<BridgeResult> => {
+      opencodeCalls += 1;
+      return { ok: true, final_response: "opencode", usage: { tokens: 0 }, emitted_event_ids: [] };
+    };
+
+    const result = await dispatchReadyTask(db, task, { ccBridge: ccSpy, bridge: opencodeSpy });
+
+    // The CC bridge was invoked exactly once; the opencode bridge was NOT.
+    expect(ccCalls).toBe(1);
+    expect(opencodeCalls).toBe(0);
+    expect(result.violations).toEqual([]);
+    expect(result.bridge_result?.ok).toBe(true);
+
+    // The dispatch decided the claude_agent lane.
+    const decided = db
+      .query("SELECT payload FROM events WHERE kind = 'dispatch_decided' AND task_id = ?")
+      .get(taskId) as { payload: string } | null;
+    expect(decided).not.toBeNull();
+    expect(JSON.parse(decided!.payload).route).toBe("claude_agent");
+
+    // The CC lifecycle row landed (proving the bridge seam ran).
+    const ccDispatched = db
+      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'cc_dispatched' AND task_id = ?")
+      .get(taskId) as { c: number };
+    expect(ccDispatched.c).toBe(1);
+  }, 10_000);
+
+  test("a non-apply (design/research) leaf routes to opencode, NOT the CC bridge", async () => {
+    const db = openDb(":memory:");
+    const { directiveId, taskId } = await openFixtureDCountTodos(db, "/tmp");
+    const ready = readyTasks(db, directiveId);
+    const task = ready[0]!;
+
+    let ccCalls = 0;
+    const ccSpy = async (_req: BridgeRequest, _db: Database): Promise<BridgeResult> => {
+      ccCalls += 1;
+      return { ok: true, final_response: "cc", usage: { tokens: 0 }, emitted_event_ids: [] };
+    };
+    const act = inMemoryAct({ actionResult: { result: { count: 2 } }, verifierResidual: 0 });
+
+    const result = await dispatchReadyTask(db, task, { ...act, ccBridge: ccSpy });
+    // The CC bridge must NOT have been invoked for a design/research leaf.
+    expect(ccCalls).toBe(0);
+    expect(result.violations).toEqual([]);
+
+    const decided = db
+      .query("SELECT payload FROM events WHERE kind = 'dispatch_decided' AND task_id = ?")
+      .get(taskId) as { payload: string } | null;
+    expect(JSON.parse(decided!.payload).route).not.toBe("claude_agent");
+  }, 10_000);
+
+  test("the CC route uses claudeCodeQuery by default (ACC2_BRIDGE_MODE=mock keeps it hermetic)", async () => {
+    // No ccBridge injected → defaults to claudeCodeQuery, which is
+    // ACC2_BRIDGE_MODE-aware. Under the test preload (mock), it runs the
+    // hermetic claudeCodeQueryMock — never a real subprocess.
+    const db = openDb(":memory:");
+    const { directiveId, taskId } = seedApplyLeaf(db);
+    const ready = readyTasks(db, directiveId);
+    const task = ready.find((r) => r.id === taskId)!;
+
+    const result = await dispatchReadyTask(db, task, {});
+    // The default CC path returns a bridge_result (mock recognizes the marker
+    // or fails cleanly); either way no real subprocess is launched and the
+    // dispatch closes deterministically with the claude_agent route.
+    expect(result.bridge_result).toBeDefined();
+    const decided = db
+      .query("SELECT payload FROM events WHERE kind = 'dispatch_decided' AND task_id = ?")
+      .get(taskId) as { payload: string } | null;
+    expect(JSON.parse(decided!.payload).route).toBe("claude_agent");
+    const ccDispatched = db
+      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'cc_dispatched' AND task_id = ?")
+      .get(taskId) as { c: number };
+    // The hermetic mock emits cc_dispatched on entry.
+    expect(ccDispatched.c).toBeGreaterThanOrEqual(1);
+  }, 10_000);
+});
+
 // Amendment KN78GX0J — PRE-action owner-control hard gate in the dispatcher.
 describe("task_dispatcher owner-control gate (amendment KN78GX0J)", () => {
   const SANDBOX: SandboxDecl = {

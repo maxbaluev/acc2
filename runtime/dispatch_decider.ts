@@ -32,7 +32,7 @@ import { lowRiskInlinePatterns } from "../substrate/views";
 import { parseResourceRefs, resourceMatchesPattern, type ResourceRef } from "./resource_uri";
 import { betaMean as canonicalBetaMean, betaEvidenceConfidence } from "./posterior";
 import { goalShape as computeGoalShape } from "./goal_shape";
-import { buildRankingContext, rankStrategies, applyStrategyRouteDeltas, type RankedStrategy } from "./dispatch_strategy_ranker";
+import { buildRankingContext, rankStrategies, applyStrategyRouteDeltas, selectDecisionPolicyArtifacts, type RankedStrategy } from "./dispatch_strategy_ranker";
 
 /** Default Tier-0 recipe-replay confidence threshold (§15). Recipes seed at
  *  0.5 and accumulate via updateRecipeConfidence; SEVEN successful replays
@@ -888,6 +888,181 @@ export const recordLowRiskInlineOutcome = (
   refreshInlinePatternPosterior(db, knowledgeId);
 };
 
+// ── Executor selection (increment 2/2, amendments TRJRC1NZ + BDAXGS1M) ──────
+//
+// The substrate selects an executor for every eligible leaf through a
+// scored_decision_policy_v1 row with decision_kind='executor_selection'.
+// opencode and Claude Code are both autonomously-spawnable, MCP-connected
+// engines. A policy keyed by the current goal_shape may declare a preferred
+// executor ('claude_agent' for implementation/apply/forensic leaves, or
+// 'opencode' for design/research leaves) plus an optional confidence weight;
+// the selected policy's artifact_id is cited so the standard credit envelope
+// moves its posterior from downstream residuals.
+//
+// DETERMINISTIC FALLBACK (no scored policy): the selection is STRUCTURAL, not
+// keyword/regex over language. An implementation/apply leaf — one carrying a
+// source_proposal_id (synthetic task_node_opened from the contract amendment
+// consumer), requires_deliverable, or a non-empty declared target_resources
+// set — prefers the claude_agent executor (Claude Code is the substrate's
+// semantic-edit engine). Every other leaf defaults to opencode_brain (the
+// strategic-synthesis engine). The fallback never hard-prunes a lane: it
+// contributes a bounded route_score delta, so the residual-scored selection
+// (and any live external Claude peer posterior) still decides the winner.
+
+export type ExecutorSelection = {
+  /** Which executor lane the selection prefers. */
+  preferred_route: "claude_agent" | "opencode_brain";
+  /** Bounded [0,1] weight applied as a route_score delta toward the preferred
+   *  lane. Higher when a scored policy declares high confidence. */
+  weight: number;
+  /** Cited scored_decision_policy_v1 artifact id, when a policy shaped the
+   *  selection (null on the deterministic fallback). */
+  decision_policy_artifact_id: string | null;
+  /** Why this executor was preferred — for dispatch_decided evidence. */
+  reason: string;
+};
+
+const EXECUTOR_SELECTION_DECISION_KIND = "executor_selection";
+const EXECUTOR_SELECTION_MAX_DELTA = 0.3;
+
+/** Is this leaf an implementation/apply leaf? STRUCTURAL signals only — no
+ *  language classification. Synthetic implementation tasks emitted by the
+ *  contract amendment consumer carry source_proposal_id + requires_deliverable;
+ *  any leaf with a declared repo target set is an edit/apply leaf. */
+/** Read the structural implementation-leaf signals from the task's
+ *  `task_node_opened` payload. The thin TaskNode the scheduler builds
+ *  (runtime/task_topology.ts) carries only id/goal/status, so executor
+ *  selection reads the apply-leaf markers (executor_hint, source_proposal_id,
+ *  requires_deliverable, target_files/target_resources) straight from the
+ *  ledger when they are not already attached to the TaskNode. */
+const readImplementationLeafSignals = (
+  db: Database,
+  task: TaskNode,
+): { executor_hint?: string; source_proposal_id?: string; requires_deliverable?: boolean } => {
+  try {
+    const row = db
+      .query(
+        `SELECT payload FROM events
+          WHERE kind = 'task_node_opened' AND task_id = ?
+          ORDER BY ts DESC LIMIT 1`,
+      )
+      .get(task.id) as { payload: string } | null;
+    if (!row?.payload) return {};
+    const p = safeJson(row.payload);
+    return {
+      executor_hint: typeof p.executor_hint === "string" ? p.executor_hint : undefined,
+      source_proposal_id: typeof p.source_proposal_id === "string" ? p.source_proposal_id : undefined,
+      requires_deliverable: p.requires_deliverable === true,
+    };
+  } catch {
+    return {};
+  }
+};
+
+// An apply/implementation leaf is identified by EXPLICIT structural markers —
+// NOT by the mere presence of a repo target (which most code directives carry).
+// Over-broadening to "any repo target" would flip ordinary opencode design
+// work to the CC executor and starve the strategic-synthesis lane. The markers
+// are: an explicit executor_hint, a source_proposal_id (synthetic
+// task_node_opened emitted by the contract amendment consumer for an apply
+// leaf), or requires_deliverable (the consumer stamps this on apply tasks).
+const isImplementationLeaf = (db: Database, task: TaskNode): boolean => {
+  const t = task as TaskNode & {
+    source_proposal_id?: unknown;
+    requires_deliverable?: unknown;
+    executor_hint?: unknown;
+  };
+  if (t.executor_hint === "claude_agent") return true;
+  if (typeof t.source_proposal_id === "string" && t.source_proposal_id.trim().length > 0) return true;
+  if (t.requires_deliverable === true) return true;
+  // Prefer markers already attached to the TaskNode; fall back to the ledger
+  // (the thin scheduler TaskNode carries only id/goal/status).
+  const ledger = readImplementationLeafSignals(db, task);
+  if (ledger.executor_hint === "claude_agent") return true;
+  if (ledger.source_proposal_id && ledger.source_proposal_id.trim().length > 0) return true;
+  if (ledger.requires_deliverable === true) return true;
+  return false;
+};
+
+/** Select the executor for a leaf. Scored-policy-first, deterministic
+ *  structural fallback. Pure read; cites the governing policy artifact. */
+export const selectExecutor = (
+  db: Database,
+  task: TaskNode,
+  goalShapeKey: string,
+): ExecutorSelection => {
+  // 1. Scored policy leg: retrieve the best executor_selection policy for the
+  //    current goal_shape. The policy body declares POLICY = { executor,
+  //    confidence? } (executor ∈ {'claude_agent','opencode'}).
+  let policies: ReturnType<typeof selectDecisionPolicyArtifacts> = [];
+  try {
+    policies = selectDecisionPolicyArtifacts(db, {
+      decision_kind: EXECUTOR_SELECTION_DECISION_KIND,
+      goal_shape: goalShapeKey,
+      topN: 1,
+    });
+  } catch {
+    policies = [];
+  }
+  const policy = policies[0];
+  if (policy) {
+    const params = policy.policy_params ?? {};
+    const declared = typeof params.executor === "string" ? params.executor : undefined;
+    const preferred: "claude_agent" | "opencode_brain" =
+      declared === "claude_agent"
+        ? "claude_agent"
+        : declared === "opencode" || declared === "opencode_brain"
+          ? "opencode_brain"
+          : isImplementationLeaf(db, task)
+            ? "claude_agent"
+            : "opencode_brain";
+    const declaredConfidence =
+      typeof params.confidence === "number" ? Math.max(0, Math.min(1, params.confidence)) : null;
+    // rank_weight is the standard act_artifact posterior (score × confidence);
+    // fold in the policy's declared confidence when present.
+    const weight = Math.max(0, Math.min(1, declaredConfidence ?? policy.rank_weight));
+    return {
+      preferred_route: preferred,
+      weight,
+      decision_policy_artifact_id: policy.artifact_id,
+      reason: "scored_executor_selection_policy",
+    };
+  }
+
+  // 2. Deterministic structural fallback (no scored policy).
+  const liveClaudePeer = hasLiveClaudeAgentPeer(db);
+  if (isImplementationLeaf(db, task)) {
+    return {
+      preferred_route: "claude_agent",
+      // Base structural preference + small live-peer posterior nudge.
+      weight: Math.min(EXECUTOR_SELECTION_MAX_DELTA, 0.15 + (liveClaudePeer ? 0.1 : 0)),
+      decision_policy_artifact_id: null,
+      reason: "deterministic_implementation_leaf_to_claude_agent",
+    };
+  }
+  // A non-apply leaf defaults to opencode_brain — BUT only when there is no
+  // positive claude_agent evidence to defer to. A live external Claude peer is
+  // positive evidence for the claude_agent lane (per amendment 0MD1R9T8: the
+  // peer no longer gates feasibility but still contributes posterior weight).
+  // When such a peer is live, yield (weight 0) so the peer-accuracy posterior
+  // adjustment already folded into route_scores governs the engine choice
+  // instead of a fixed opencode lift overriding it.
+  if (liveClaudePeer) {
+    return {
+      preferred_route: "opencode_brain",
+      weight: 0,
+      decision_policy_artifact_id: null,
+      reason: "deterministic_default_yields_to_live_claude_peer_posterior",
+    };
+  }
+  return {
+    preferred_route: "opencode_brain",
+    weight: 0.15,
+    decision_policy_artifact_id: null,
+    reason: "deterministic_default_to_opencode_brain",
+  };
+};
+
 export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision => {
   const baseEvidence = buildDispatchDecisionEvidence(db, task);
 
@@ -927,12 +1102,13 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
   // low-risk inline pattern, the inline lane is feasible; the scored route
   // selection (and learned/peer-accuracy posteriors) decide whether it wins.
   if (matchedInlinePatterns && matchedInlinePatterns.length > 0) feasibleRoutes.push("claude_inline");
-  // Tier U/U5: the substrate cannot spawn Claude. It may route to the
-  // claude_agent lane only when a live Claude orchestrator/agent peer is
-  // already registered and heartbeating, so queued jobs always have a
-  // plausible external drainer. Without that peer, fail closed to the
-  // existing opencode_brain / claude_inline lanes.
-  if (hasLiveClaudeAgentPeer(db)) feasibleRoutes.push("claude_agent");
+  // Symmetric executor-selection (increment 2/2, amendment 0MD1R9T8): Claude
+  // Code is now a substrate-spawnable engine through runtime/bridge/claude.ts,
+  // so claude_agent is a co-equal feasible executor alongside opencode_brain. A
+  // live external Claude peer still contributes posterior evidence through
+  // peer_activity_view (and the executor_selection policy below), but it is no
+  // longer the feasibility gate for the executor lane.
+  feasibleRoutes.push("claude_agent");
 
   // Route availability still fails closed (no recipe/no inline knowledge means
   // no such lane). When a peer lane is feasible, fold in the per-peer,
@@ -955,13 +1131,46 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
 
   const strategyAdjusted = applyStrategyRouteDeltas(posteriorAdjusted.route_scores, strategyRanks, feasibleRoutes);
 
+  // EXECUTOR SELECTION (increment 2/2): choose claude_agent vs opencode_brain
+  // by goal-shape via scored_decision_policy_v1 decision_kind=executor_selection
+  // (deterministic structural fallback when no policy). Executor selection is
+  // authoritative ONLY for the engine choice between the two substrate-spawnable
+  // brain executors (opencode_brain ↔ claude_agent) — it does NOT disturb the
+  // claude_inline / substrate_replay lanes, whose own scored evidence still
+  // decides whether they win outright. So the preferred executor lane is lifted
+  // to win over the OTHER executor lane (by its bounded weight), while inline /
+  // replay precedence is preserved. Never hard-prunes a lane.
+  const goalShapeKey = currentGoalShapeForTask(db, task);
+  const executorSelection = selectExecutor(db, task, goalShapeKey);
+  const executorAdjustedScores: Record<string, number> = { ...strategyAdjusted.route_scores };
+  const PREFERRED = executorSelection.preferred_route;
+  const OTHER = PREFERRED === "claude_agent" ? "opencode_brain" : "claude_agent";
+  const executorDelta = Math.max(0, Math.min(EXECUTOR_SELECTION_MAX_DELTA, executorSelection.weight));
+  if (feasibleRoutes.includes(PREFERRED) && executorDelta > 0) {
+    const otherScore = feasibleRoutes.includes(OTHER) ? (executorAdjustedScores[OTHER] ?? 0) : 0;
+    // Lift the preferred engine above the other engine by `delta`, capped to
+    // [0,1]. This makes executor selection decisive between the two engines
+    // regardless of their pre-existing base axis scores, without inflating the
+    // preferred lane past inline/replay lanes that scored higher on merit. A
+    // zero-weight selection (the deterministic default yielding to a live
+    // Claude-peer posterior) leaves base/peer-adjusted scores untouched so the
+    // upstream posterior governs the engine choice.
+    const lifted = Math.max(
+      (executorAdjustedScores[PREFERRED] ?? 0) + executorDelta,
+      otherScore + executorDelta,
+    );
+    executorAdjustedScores[PREFERRED] = Math.max(0, Math.min(1, lifted));
+  }
+
   const routeEvidence = {
     ...baseEvidence,
-    route_scores: strategyAdjusted.route_scores,
+    route_scores: executorAdjustedScores,
     verifier_evidence: {
       ...baseEvidence.verifier_evidence,
       ...posteriorAdjusted.verifier_evidence,
       ...strategyAdjusted.verifier_evidence,
+      executor_selection_weight: executorSelection.weight,
+      executor_selection_policy_cited: executorSelection.decision_policy_artifact_id ? 1 : 0,
     },
     strategy_ranks: strategyRanks,
     strategy_shadow_ranks: strategyRanks,
@@ -983,16 +1192,21 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
   }
 
   if (selectedRoute === "claude_agent") {
+    const acceptancePredicate: Record<string, unknown> = {
+      kind: "task_residual_below_threshold",
+      residual_below: 0.3,
+      closure_requires_act_tuple_recorded: true,
+      executor: "claude_agent",
+    };
+    if (executorSelection.decision_policy_artifact_id) {
+      acceptancePredicate.executor_selection_policy_id = executorSelection.decision_policy_artifact_id;
+    }
     return {
       route: "claude_agent",
       job_intent: task.goal,
       target_files: taskTargetResources(task).map((target) => target.startsWith("repo:") ? target.slice("repo:".length) : target),
-      acceptance_predicate: {
-        kind: "task_residual_below_threshold",
-        residual_below: 0.3,
-        closure_requires_act_tuple_recorded: true,
-      },
-      reason: "live_claude_agent_peer_scored_lane",
+      acceptance_predicate: acceptancePredicate,
+      reason: `executor_selection:${executorSelection.reason}`,
       ...evidence,
     };
   }
