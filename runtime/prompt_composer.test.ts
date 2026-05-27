@@ -13,6 +13,8 @@ import {
   composePrompt,
   estimateTokens,
   readOwnerProfile,
+  TaskNotFoundError,
+  taskNodeExists,
 } from "./prompt_composer";
 import type { OwnerRenderingPolicyRow, OwnerStateBeliefRow, TopLawRow } from "../substrate/views";
 import { newId } from "./ids";
@@ -811,10 +813,47 @@ describe("prompt_composer", () => {
     expect(composed.truncated).toContain("constitutional_gates");
   });
 
-  test("returns a clear stub when task not found", async () => {
+  // MBZC8AZP / E3X6EH6D — a missing task_node_opened row must NEVER become a
+  // renderable prompt. Pre-fix, composePrompt returned a `TASK NOT FOUND` stub
+  // string the dispatcher then shipped to the bridge (wasted call, surfaced as
+  // bridge_failed: prompt_composer_task_not_found). Now it throws a typed,
+  // non-renderable error so the caller cannot dispatch a missing task.
+  test("throws a typed error (non-renderable) when task not found", async () => {
     const db = openDb(":memory:");
-    const composed = await composePrompt(db, { taskId: "nonexistent_task" });
-    expect(composed.text).toContain("TASK NOT FOUND");
+    let thrown: unknown;
+    try {
+      await composePrompt(db, { taskId: "nonexistent_task" });
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(TaskNotFoundError);
+    expect((thrown as TaskNotFoundError).kind).toBe("prompt_composer_task_not_found");
+    expect((thrown as TaskNotFoundError).taskId).toBe("nonexistent_task");
+    // No renderable "TASK NOT FOUND" prompt text can leak from the failure.
+    expect((thrown as Error).message).not.toContain("TASK NOT FOUND");
+  });
+
+  test("taskNodeExists: false for absent row, true once task_node_opened is emitted", async () => {
+    const db = openDb(":memory:");
+    expect(await taskNodeExists(db, "ghost_task")).toBe(false);
+    const directiveId = newId();
+    const taskId = newId();
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: directiveId,
+      payload: { directive_text: "exists", lifecycle: "finite" },
+    });
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "owner",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { goal: "real task", lifecycle: "finite", urgency: "normal" },
+    });
+    expect(await taskNodeExists(db, taskId)).toBe(true);
+    expect(await taskNodeExists(db, "ghost_task")).toBe(false);
   });
 
   test("includes promoted-knowledge entries when present", async () => {

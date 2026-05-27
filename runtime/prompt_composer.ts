@@ -263,6 +263,37 @@ const readTaskRow = async (db: Database, taskId: string): Promise<TaskRow | null
   };
 };
 
+/** Typed failure raised by composePrompt when the task's `task_node_opened`
+ *  ledger row is absent (MBZC8AZP / E3X6EH6D). A missing task row must NEVER
+ *  become a renderable prompt — the old `TASK NOT FOUND` stub silently
+ *  produced a brain prompt for a non-existent task, wasting a bridge call and
+ *  surfacing as `bridge_failed: prompt_composer_task_not_found`. The dispatcher
+ *  admission guard catches this (and pre-checks via `taskNodeExists`) so the
+ *  failure is non-renderable: no bridge call is ever made. */
+export class TaskNotFoundError extends Error {
+  readonly kind = "prompt_composer_task_not_found" as const;
+  readonly taskId: string;
+  constructor(taskId: string) {
+    super(`prompt_composer_task_not_found: ${taskId}`);
+    this.name = "TaskNotFoundError";
+    this.taskId = taskId;
+  }
+}
+
+/** Cheap presence check for a task's `task_node_opened` ledger row, reading the
+ *  SAME source of truth as `readTaskRow`. The dispatcher uses this as a
+ *  fail-closed admission guard immediately before emitting `brain_dispatched`,
+ *  so a dispatch can never fire (and the bridge can never be called) for a task
+ *  whose ledger row is absent (MBZC8AZP / E3X6EH6D). */
+export const taskNodeExists = async (db: Database, taskId: string): Promise<boolean> => {
+  const rows = await poolQuery<Record<string, unknown>>(
+    db,
+    "SELECT id FROM events WHERE task_id = ? AND kind = 'task_node_opened' ORDER BY ts ASC LIMIT 1",
+    [taskId],
+  );
+  return (rows[0] ?? null) !== null;
+};
+
 const readDirectiveGoal = async (db: Database, directiveId: string): Promise<string | null> => {
   const rows = await poolQuery<Record<string, unknown>>(
     db,
@@ -2054,14 +2085,14 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
   const budget = opts.budgetTokens ?? DEFAULT_BUDGET_TOKENS;
   const task = await readTaskRow(db, opts.taskId);
   if (!task) {
-    // Empty stub so tests have something to assert; the dispatcher gates
-    // on the task existing before calling us.
-    const text = `TASK NOT FOUND: ${opts.taskId}`;
-    return {
-      text,
-      sections: [{ name: "task_not_found", priorityP: 0, tokens: estimateTokens(text) }],
-      truncated: [],
-    };
+    // Non-renderable failure (MBZC8AZP / E3X6EH6D). A missing `task_node_opened`
+    // row must NEVER become a brain prompt. The old `TASK NOT FOUND` stub was a
+    // renderable string the dispatcher then shipped to the bridge — wasting a
+    // bridge call and surfacing as `bridge_failed: prompt_composer_task_not_found`.
+    // Throwing a typed error guarantees the caller cannot dispatch a missing task;
+    // the dispatcher's admission guard pre-checks via `taskNodeExists` and also
+    // treats this throw as "do not call the bridge".
+    throw new TaskNotFoundError(opts.taskId);
   }
 
   const directiveText = await readDirectiveGoal(db, task.directive_id);

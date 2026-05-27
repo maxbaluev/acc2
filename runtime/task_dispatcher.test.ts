@@ -1348,4 +1348,63 @@ describe("deliverable compounding dispatch (Component C)", () => {
     expect(goal).toContain("current_best_artifact_id=gb_body");
     expect(goal).toContain("supersedes=gb_body");
   });
+
+  // MBZC8AZP / E3X6EH6D — admission guard. A brain-dispatch must NEVER fire for
+  // a task whose `task_node_opened` ledger row is absent. Pre-fix, brain_dispatched
+  // fired before composePrompt, the composer returned a `TASK NOT FOUND` stub, and
+  // the bridge was called on garbage — surfacing as bursts of
+  // bridge_failed: prompt_composer_task_not_found / dispatch_zombie_missing_task.
+  test("admission guard: missing task_node_opened → dispatcher_violation, NO brain_dispatched, NO bridge call", async () => {
+    const db = openDb(":memory:");
+    // A real directive exists, but the task node was never opened (or was abandoned
+    // and its row is gone): synthesize a TaskNode whose id has no task_node_opened row.
+    emitEvent(db, {
+      kind: "directive_opened",
+      substrate_origin: "owner",
+      directive_id: "dir_guard",
+      task_id: "root_guard",
+      payload: { goal: "guard directive" } as JsonValue,
+      invoker: "owner",
+    });
+    const ghostTaskId = newId();
+    const ghost = {
+      id: ghostTaskId,
+      directive_id: "dir_guard",
+      parent_id: null,
+      goal: "ghost task with no task_node_opened row",
+      status: "ready" as const,
+    };
+
+    let bridgeCalled = false;
+    const spyBridge = async (_req: BridgeRequest, _db: Database): Promise<BridgeResult> => {
+      bridgeCalled = true;
+      return { ok: true, final_response: "should not run", usage: { tokens: 0 }, emitted_event_ids: [] };
+    };
+
+    const result = await dispatchReadyTask(db, ghost, {
+      bridge: spyBridge as unknown as typeof dispatchReadyTask extends (db: unknown, t: unknown, d: { bridge?: infer B }) => unknown ? B : never,
+    });
+
+    // Bridge was never invoked.
+    expect(bridgeCalled).toBe(false);
+    // No brain_dispatched event for the ghost task.
+    const brainDispatched = db
+      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'brain_dispatched' AND task_id = ?")
+      .get(ghostTaskId) as { c: number };
+    expect(brainDispatched.c).toBe(0);
+    // A dispatcher_violation WAS emitted with the missing-node failure_kind.
+    const violation = db
+      .query("SELECT failure_kind, payload FROM events WHERE kind = 'dispatcher_violation' AND task_id = ?")
+      .get(ghostTaskId) as { failure_kind: string; payload: string } | null;
+    expect(violation).not.toBeNull();
+    expect(violation!.failure_kind).toBe("missing_task_node_opened_for_brain_dispatch");
+    // The returned violations array carries the reason; no bridge_result was set.
+    expect(result.violations).toContain("missing_task_node_opened_for_brain_dispatch");
+    expect(result.bridge_result).toBeUndefined();
+    // No prompt was composed → no bridge_invoked / bridge_failed / bridge_completed.
+    const promptSide = db
+      .query("SELECT COUNT(*) as c FROM events WHERE kind IN ('bridge_invoked','bridge_failed','bridge_completed') AND task_id = ?")
+      .get(ghostTaskId) as { c: number };
+    expect(promptSide.c).toBe(0);
+  });
 });

@@ -26,7 +26,7 @@ import { ARTIFACT_LIFECYCLE_KINDS } from "../substrate/event_kinds";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
 import { poolQuery } from "./sql_pool_singleton";
-import { composePrompt, readOwnerProfile } from "./prompt_composer";
+import { composePrompt, readOwnerProfile, taskNodeExists } from "./prompt_composer";
 import { evaluateOwnerControlGate } from "./owner_state_transition_verifier";
 import { getReloadable } from "./reloadable";
 
@@ -270,6 +270,42 @@ export const dispatchReadyTask = async (
   const violations: string[] = [];
   const bridge = deps.bridge ?? opencodeQuery;
   const runArtifact = deps.runArtifact ?? runArtifactForRuntime;
+
+  // 0. Admission guard (MBZC8AZP / E3X6EH6D) — fail-closed. Re-read the task's
+  // `task_node_opened` ledger row IMMEDIATELY before emitting `brain_dispatched`.
+  // If it is absent, the task is unrecoverable for this dispatch: emit a
+  // `dispatcher_violation` and return cleanly WITHOUT emitting `brain_dispatched`,
+  // WITHOUT composing a prompt, and WITHOUT invoking the bridge. Pre-fix, a
+  // `brain_dispatched` fired for a missing task, composePrompt returned a
+  // `TASK NOT FOUND` stub, and the bridge was called on garbage — surfacing as
+  // bursts of `bridge_failed: prompt_composer_task_not_found` /
+  // `dispatch_zombie_missing_task`. The existing abandon/reconcile path owns the
+  // task lifecycle from here.
+  if (!(await taskNodeExists(db, task.id))) {
+    emitEvent(db, {
+      kind: "dispatcher_violation",
+      substrate_origin: "substrate_auto",
+      directive_id: task.directive_id,
+      task_id: task.id,
+      failure_kind: "missing_task_node_opened_for_brain_dispatch",
+      payload: {
+        dispatch_id: dispatchId,
+        reason: "missing_task_node_opened_for_brain_dispatch",
+        task_id: task.id,
+      } as JsonValue,
+    });
+    violations.push("missing_task_node_opened_for_brain_dispatch");
+    // No brain_dispatched, no composePrompt, no bridge — the dispatcher_violation
+    // above is the only ledger write. The existing abandon/reconcile path owns
+    // the task lifecycle from here. `events` mirrors the other early-return shape
+    // (read-back dispatchEvents); none were collected pre-dispatch, so it is empty.
+    return {
+      dispatch_id: dispatchId,
+      task_id: task.id,
+      events: [],
+      violations,
+    };
+  }
 
   // 1. brain_dispatched — carries the owning peer_id (amendment 34JT5W47) so the
   // supervisor's redispatch-storm detector groups its dispatch-rate window BY
