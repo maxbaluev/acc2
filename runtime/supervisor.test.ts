@@ -28,6 +28,21 @@ const insertDispatch = (db: ReturnType<typeof openDb>, ts: string, taskId: strin
   ).run(newId(), ts, directiveId, taskId, JSON.stringify({ dispatch_id: newId() }));
 };
 
+/** Insert a brain_dispatched carrying an explicit peer_id (amendment 34JT5W47).
+ *  Per-peer storm grouping reads payload.peer_id. */
+const insertPeerDispatch = (
+  db: ReturnType<typeof openDb>,
+  ts: string,
+  taskId: string,
+  directiveId: string,
+  peerId: string,
+) => {
+  db.query(
+    `INSERT INTO events (id, ts, kind, substrate_origin, directive_id, task_id, loop_id, payload)
+     VALUES (?, ?, 'brain_dispatched', 'substrate_auto', ?, ?, '', ?)`,
+  ).run(newId(), ts, directiveId, taskId, JSON.stringify({ dispatch_id: newId(), peer_id: peerId }));
+};
+
 describe("supervisor — detectRedispatchStorm", () => {
   test("does NOT quarantine a task with dispatches below the threshold", async () => {
     const db = openDb(":memory:");
@@ -82,6 +97,90 @@ describe("supervisor — detectRedispatchStorm", () => {
       .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'task_failed' AND task_id = ?")
       .get(taskId) as { c: number };
     expect(failedCount.c).toBe(1);
+  });
+});
+
+describe("supervisor — PER-PEER redispatch-storm grouping (amendment 34JT5W47)", () => {
+  // (b) peer A's dispatch burst trips ONLY peer A's storm guard; peer B
+  // unaffected. The live failure this replaces: dispatches from ALL peers were
+  // counted together against one global window, so peer A's refinement chain
+  // tripped the storm even though no single peer was runaway.
+  test("peer A's burst on a task does NOT trip storm for peer B on the SAME task", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const directiveId = newId();
+    const taskId = newId();
+    // Peer A: just AT the threshold (not over) — must NOT trip alone.
+    for (let i = 0; i < SUPERVISOR_MAX_REDISPATCHES_PER_TASK; i++) {
+      insertPeerDispatch(db, new Date(now - 1000 * i).toISOString(), taskId, directiveId, "peer-A");
+    }
+    // Peer B: a few dispatches on the same task — these would have pushed the
+    // GLOBAL count over the edge before per-peer grouping. They must not.
+    for (let i = 0; i < 4; i++) {
+      insertPeerDispatch(db, new Date(now - 500 * i).toISOString(), taskId, directiveId, "peer-B");
+    }
+    const quarantined = detectRedispatchStorm(db, { nowMs: now });
+    // Neither peer is OVER its own per-peer threshold → no storm.
+    expect(quarantined.length).toBe(0);
+    const failed = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'task_failed' AND task_id = ?")
+      .get(taskId) as { c: number };
+    expect(failed.c).toBe(0);
+  });
+
+  // (c) a single peer genuinely exceeding ITS per-peer threshold IS still cut.
+  test("a single runaway peer over its per-peer threshold IS still quarantined", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const directiveId = newId();
+    const taskId = newId();
+    // Peer A goes runaway: > threshold on its own.
+    for (let i = 0; i <= SUPERVISOR_MAX_REDISPATCHES_PER_TASK; i++) {
+      insertPeerDispatch(db, new Date(now - 1000 * i).toISOString(), taskId, directiveId, "peer-A");
+    }
+    // Peer B has a healthy handful — must stay unaffected.
+    for (let i = 0; i < 2; i++) {
+      insertPeerDispatch(db, new Date(now - 700 * i).toISOString(), taskId, directiveId, "peer-B");
+    }
+    const quarantined = detectRedispatchStorm(db, { nowMs: now });
+    expect(quarantined.length).toBe(1);
+    expect(quarantined[0].peer_id).toBe("peer-A");
+    expect(quarantined[0].task_id).toBe(taskId);
+    const failed = db
+      .query("SELECT payload FROM events WHERE kind = 'task_failed' AND task_id = ?")
+      .get(taskId) as { payload: string } | null;
+    expect(JSON.parse(failed!.payload).peer_id).toBe("peer-A");
+  });
+
+  // Two peers EACH runaway on their own tasks each trip independently.
+  test("two independent runaway peers each trip their OWN storm guard", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const directiveId = newId();
+    const taskA = newId();
+    const taskB = newId();
+    for (let i = 0; i <= SUPERVISOR_MAX_REDISPATCHES_PER_TASK; i++) {
+      insertPeerDispatch(db, new Date(now - 1000 * i).toISOString(), taskA, directiveId, "peer-A");
+      insertPeerDispatch(db, new Date(now - 1000 * i).toISOString(), taskB, directiveId, "peer-B");
+    }
+    const quarantined = detectRedispatchStorm(db, { nowMs: now });
+    expect(quarantined.length).toBe(2);
+    expect(new Set(quarantined.map((q) => q.peer_id))).toEqual(new Set(["peer-A", "peer-B"]));
+  });
+
+  // (d) dispatches with NO peer_id route to the explicit unknown-peer bucket.
+  test("dispatches without peer_id group under the explicit unknown-peer bucket", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const directiveId = newId();
+    const taskId = newId();
+    // Legacy/un-stamped dispatches (insertDispatch writes no peer_id).
+    for (let i = 0; i <= SUPERVISOR_MAX_REDISPATCHES_PER_TASK; i++) {
+      insertDispatch(db, new Date(now - 1000 * i).toISOString(), taskId, directiveId);
+    }
+    const quarantined = detectRedispatchStorm(db, { nowMs: now });
+    expect(quarantined.length).toBe(1);
+    expect(quarantined[0].peer_id).toBe("peer-unknown");
   });
 });
 

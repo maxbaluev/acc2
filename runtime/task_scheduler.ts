@@ -37,8 +37,38 @@ import { findDeferringConflict } from "./interference";
 import { isBridgeHealthDegraded } from "./bridge_health";
 import { claimDispatchLease, releaseDispatchLease } from "./dispatch_leases";
 import { closeOrphanedBrainDispatches, getBootSessionToken } from "./brain_dispatch_reconciler";
-import { getResourceGovernor, actorFromContext } from "./resource_governor";
+import { getResourceGovernor } from "./resource_governor";
+import { UNKNOWN_PEER_ID } from "./peer_registry";
 import { logger } from "./logger";
+
+/** Resolve the peer_id that OWNS a directive (amendment 34JT5W47). Brain-
+ *  dispatch admission + storm grouping are keyed per peer; the owning peer is
+ *  the ingress identity that opened/last touched the directive, recorded by
+ *  peer_registry's peer_registered / peer_liveness events (both carry
+ *  directive_id). Returns the most-recent self-identified peer for the
+ *  directive, or the explicit unknown-peer fallback bucket when no peer
+ *  identified itself — consistent with how multipeer ingress defaults unknown
+ *  peers (UNKNOWN_PEER_ID). Pure read; never throws into admission. */
+const resolveDirectivePeerId = (db: Database, directiveId: string): string => {
+  if (!directiveId) return UNKNOWN_PEER_ID;
+  try {
+    const row = db
+      .query(
+        `SELECT json_extract(payload, '$.peer_id') AS peer_id
+           FROM events
+          WHERE kind IN ('peer_registered', 'peer_liveness')
+            AND directive_id = ?
+            AND json_extract(payload, '$.peer_id') IS NOT NULL
+          ORDER BY ts DESC, rowid DESC
+          LIMIT 1`,
+      )
+      .get(directiveId) as { peer_id: string | null } | null;
+    const peerId = row?.peer_id;
+    return typeof peerId === "string" && peerId.length > 0 ? peerId : UNKNOWN_PEER_ID;
+  } catch {
+    return UNKNOWN_PEER_ID;
+  }
+};
 
 // Interaction kinds that block another directive's dispatch when one of the
 // two is mid-flight. `mutual_exclusion` is symmetric (either side blocks the
@@ -316,12 +346,13 @@ const clearInFlightTask = (taskId: string, db?: Database): void => {
   IN_FLIGHT_RESOURCE_COST.delete(taskId);
   IN_FLIGHT_EXCLUSIVE_RESOURCES.delete(taskId);
   IN_FLIGHT_BRAIN.delete(taskId);
-  // Release the GLOBAL governor brain_slots lease (meltdown-stopper) so the
-  // freed slot re-admits a queued brain next tick. Idempotent: releasing an
-  // absent/already-released lease is a harmless no-op (never underflows).
+  // Release the PER-PEER governor brain slot (amendment 34JT5W47) so the freed
+  // slot re-admits a queued brain for THAT peer next tick. Idempotent:
+  // releasing an absent/already-released lease is a harmless no-op (never
+  // underflows).
   const govLeaseId = IN_FLIGHT_BRAIN_GOV_LEASE.get(taskId);
   if (govLeaseId) {
-    getResourceGovernor().releaseLease(govLeaseId);
+    getResourceGovernor().releaseBrainSlot(govLeaseId);
     IN_FLIGHT_BRAIN_GOV_LEASE.delete(taskId);
   }
   // Release the durable cross-process lease on completion. Idempotent: a
@@ -917,9 +948,18 @@ const taskAdmissionEconomics = (db: Database, task: TaskNode): TaskAdmissionEcon
   return { expected_value: expectedValue, resource_cost: resourceCost, exclusive_resources: exclusiveResources };
 };
 
+// Amendment 34JT5W47: brain_slots is deliberately NOT a marginal-value resource
+// budget dimension. A `brain_slots: computeBrainDispatchCap()` budget here would
+// be a GLOBAL cross-peer admission counter (firstBudgetConflict sums brain_slots
+// across ALL in-flight tasks regardless of peer) — exactly the shared cap the
+// predicate forbids. Brain admission is now keyed PER PEER via the governor's
+// requestBrainSlot (one peer at its cap never blocks another). The host-RAM OOM
+// / reactivity ceiling is preserved as a HOST resource fact (not a cross-peer
+// counter) by the daemon_heap_pressure + handshake-permit gates below, both of
+// which still consult computeBrainDispatchCap / live host memory. Callers may
+// still inject an explicit brain_slots budget via opts.resourceBudget for tests.
 const schedulerResourceBudget = (maxConcurrent: number, opts: SchedulerOpts): Record<string, number> => ({
   dispatch_slots: maxConcurrent,
-  brain_slots: computeBrainDispatchCap(),
   ...(opts.resourceBudget ?? {}),
 });
 
@@ -1785,6 +1825,17 @@ export const schedulerTick = async (
       continue;
     }
 
+    // Owning-peer identity for per-peer brain admission (amendment 34JT5W47).
+    // Resolved once per task from peer_registry ingress identity (the explicit
+    // unknown-peer fallback bucket when no peer self-identified). Threaded into
+    // the per-peer admission cap below AND into dispatchReadyTask so the
+    // emitted brain_dispatched carries peer_id (the supervisor groups storms by
+    // it). Only resolved for the brain lane — cheap routes never consume a
+    // brain slot.
+    const dispatchPeerId = decision.route === "opencode_brain"
+      ? resolveDirectivePeerId(db, task.directive_id)
+      : UNKNOWN_PEER_ID;
+
     // OOM defence: each opencode subprocess consumes ~1-2GB. The global
     // maxConcurrent cap counts ALL routes (substrate_replay + claude_inline
     // + opencode_brain) — cheap routes shouldn't squeeze brain runs out, but
@@ -1842,20 +1893,21 @@ export const schedulerTick = async (
       }
     }
 
-    // GLOBAL ADMISSION CAP (the meltdown-stopper). Before launching a brain
-    // dispatch, acquire a global governor brain_slots lease. This bounds TOTAL
-    // concurrent brain dispatches across ALL terminals/brains/actors — the
-    // dispatch/credit/retrieval storm that melts the daemon cannot grow past
-    // the global budget. At cap → QUEUE (task stays ready, re-attempts next
-    // tick); NEVER crash, NEVER over-admit. The per-RAM/handshake gates above
-    // are local heuristics; THIS is the hard process-wide ceiling.
+    // PER-PEER ADMISSION CAP (amendment 34JT5W47). Before launching a brain
+    // dispatch, acquire a PER-PEER brain slot keyed by the directive's owning
+    // peer_id (resolved from peer_registry ingress identity; the explicit
+    // unknown-peer fallback bucket when no peer self-identified). One peer at
+    // its cap is refused (queue + re-attempt next tick) while a DIFFERENT peer
+    // with headroom is admitted — no admission decision depends on a GLOBAL
+    // brain_slots cap shared across peers (the live failure this replaces: a
+    // single directive's refinement chain tripped admission/storm because all
+    // peers counted against one global counter). A genuinely runaway SINGLE
+    // peer is still bounded by its own per-peer brain budget, so the
+    // meltdown/OOM protection is preserved PER PEER (the host-RAM reactivity
+    // ceiling lives separately in computeBrainDispatchCap above). NEVER crash,
+    // NEVER over-admit.
     if (decision.route === "opencode_brain") {
-      const govActor = actorFromContext({
-        origin: "substrate_auto",
-        directive_id: task.directive_id,
-        dispatch_id: task.id,
-      });
-      const govLease = getResourceGovernor().requestLease(govActor, { brain_slots: 1 });
+      const govLease = getResourceGovernor().requestBrainSlot(dispatchPeerId);
       if (!govLease.admitted) {
         skippedConcurrencyCap.push(task.id);
         const key = gateKey(task.id, "brain_concurrency_cap");
@@ -1873,9 +1925,10 @@ export const schedulerTick = async (
               cap_kind: govLease.cap_kind ?? null,
               exhausted_resource: govLease.exhausted_resource ?? null,
               actor_key: govLease.actor_key ?? null,
-              cap_source: "global_resource_governor",
+              peer_id: dispatchPeerId,
+              cap_source: "per_peer_brain_budget",
               in_flight_brain: IN_FLIGHT_BRAIN.size,
-              note: "global brain-dispatch admission cap reached; task stays ready and re-attempts next tick — bounds the credit/retrieval storm",
+              note: "per-peer brain-dispatch admission cap reached for THIS peer; task stays ready and re-attempts next tick. A different peer with headroom is unaffected (no global cross-peer cap).",
             } as JsonValue,
           });
         }
@@ -1899,12 +1952,12 @@ export const schedulerTick = async (
       const claim = claimDispatchLease(db, task.id, leaseHolder());
       if (claim.status === "held") {
         skippedConcurrencyCap.push(task.id);
-        // Release the global governor lease we just acquired — this tick is
-        // deferring to a peer daemon, so the slot must return to the budget
-        // (clearInFlightTask is NOT called on this continue path).
+        // Release the per-peer governor brain slot we just acquired — this tick
+        // is deferring to a peer daemon, so the slot must return to that peer's
+        // budget (clearInFlightTask is NOT called on this continue path).
         const heldGovLease = IN_FLIGHT_BRAIN_GOV_LEASE.get(task.id);
         if (heldGovLease) {
-          getResourceGovernor().releaseLease(heldGovLease);
+          getResourceGovernor().releaseBrainSlot(heldGovLease);
           IN_FLIGHT_BRAIN_GOV_LEASE.delete(task.id);
         }
         emitSchedulerAdmissionGate(db, task, "dispatch_lease_held_by_peer", {
@@ -1926,6 +1979,10 @@ export const schedulerTick = async (
       promise = Promise.resolve(dispatchReadyTaskForScheduler(db, task, {
         fixtureTargetPath: opts.fixtureTargetPath,
         index: opts.index,
+        // Owning-peer identity (amendment 34JT5W47) so the emitted
+        // brain_dispatched carries peer_id; the supervisor groups
+        // redispatch-storm windows by it (per-peer storm protection).
+        peerId: dispatchPeerId,
       }))
         .catch((err: Error) => {
           // Per-dispatch error isolation. Record a failure event so the audit
@@ -2084,11 +2141,11 @@ export const _resetSchedulerForTests = (): void => {
   // so a test that didn't drain leaves IN_FLIGHT_BRAIN populated. Cleared
   // here so the next test's brain dispatch isn't artificially capped.
   IN_FLIGHT_BRAIN.clear();
-  // Release + clear any held global governor brain_slots leases so the next
-  // test starts with a fresh global admission budget (the governor is a
-  // process singleton; a leaked lease would artificially shrink the cap).
+  // Release + clear any held per-peer governor brain slots so the next test
+  // starts with a fresh admission budget (the governor is a process singleton;
+  // a leaked slot would artificially shrink a peer's cap).
   const gov = getResourceGovernor();
-  for (const leaseId of IN_FLIGHT_BRAIN_GOV_LEASE.values()) gov.releaseLease(leaseId);
+  for (const leaseId of IN_FLIGHT_BRAIN_GOV_LEASE.values()) gov.releaseBrainSlot(leaseId);
   IN_FLIGHT_BRAIN_GOV_LEASE.clear();
   GATE_NOTIFIED.clear();
   SCHEDULER_DRAINING = false;

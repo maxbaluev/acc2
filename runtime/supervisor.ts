@@ -43,6 +43,7 @@ import {
   maybeMarkRecovered,
 } from "./bridge_health";
 import { debit, maybeExhaustPathologyBudget, type PathologyKind } from "./pathology_budget";
+import { UNKNOWN_PEER_ID } from "./peer_registry";
 import { logger } from "./logger";
 
 /** Maximum brain_dispatched events allowed on ONE task within the
@@ -168,11 +169,23 @@ export const __resetSupervisorThrottle = (): void => {
 
 /** Detect tasks in a redispatch storm and fail them. Returns the list of
  *  task ids that were quarantined this tick. Idempotent — a task that
- *  already has a task_failed event will not be re-failed. */
+ *  already has a task_failed event will not be re-failed.
+ *
+ *  PER-PEER STORM GROUPING (amendment 34JT5W47): the dispatch-rate window is
+ *  grouped BY (task_id, peer_id) — NOT by task_id alone counting every peer's
+ *  dispatches together. The live failure this replaces: a single directive's
+ *  refinement chain (one peer) tripped supervisor_redispatch_storm because
+ *  dispatches from ALL peers (this Claude orchestrator + substrate
+ *  autonomous-apply + any other registered peer) were counted TOGETHER against
+ *  one window. Each brain_dispatched carries payload.peer_id (the dispatcher
+ *  stamps it; absent → the explicit unknown-peer fallback bucket). Grouping by
+ *  peer means one peer's burst trips only ITS storm guard; a different peer is
+ *  unaffected. A genuinely runaway SINGLE peer is still cut — its own per-peer
+ *  count crosses the threshold (protection preserved per peer). */
 export const detectRedispatchStorm = (
   db: Database,
   opts?: { nowMs?: number },
-): Array<{ task_id: string; directive_id: string; dispatch_count: number }> => {
+): Array<{ task_id: string; directive_id: string; dispatch_count: number; peer_id: string }> => {
   const nowMs = opts?.nowMs ?? Date.now();
   const cutoffIso = new Date(nowMs - SUPERVISOR_REDISPATCH_WINDOW_MS).toISOString();
   // Bounded GROUP BY scan over events, run synchronously on the main thread.
@@ -182,23 +195,29 @@ export const detectRedispatchStorm = (
   // to make the scan CHEAP, not to move it threads: the `ts >= cutoff` window
   // (SUPERVISOR_REDISPATCH_WINDOW_MS = 5min) bounds this to the few hundred
   // brain_dispatched rows in the last 5 minutes. A redispatch storm is by
-  // definition a burst of dispatches on ONE task in that window, so the recent
-  // window cannot miss a real storm — a storm that is genuinely ongoing emits
-  // its dispatches inside the window. EXPLAIN: SEARCH events USING INDEX
-  // idx_events_kind_ts (kind=? AND ts>?) — a ts-range seek, not a full SCAN.
+  // definition a burst of dispatches on ONE task by ONE peer in that window, so
+  // the recent window cannot miss a real storm — a storm that is genuinely
+  // ongoing emits its dispatches inside the window. The GROUP key adds peer_id
+  // (json_extract over payload, defaulting absent → the unknown-peer bucket) so
+  // one peer's burst never inflates another peer's count. EXPLAIN: SEARCH events
+  // USING INDEX idx_events_kind_ts (kind=? AND ts>?) — a ts-range seek.
   const rows = db.query<{
     task_id: string;
     directive_id: string;
+    peer_id: string;
     dispatch_count: number;
-  }, [string, number]>(
-    `SELECT task_id, directive_id, COUNT(*) AS dispatch_count
+  }, [string, string, number]>(
+    `SELECT task_id,
+            directive_id,
+            COALESCE(json_extract(payload, '$.peer_id'), ?) AS peer_id,
+            COUNT(*) AS dispatch_count
        FROM events
        WHERE kind = 'brain_dispatched' AND ts >= ?
-       GROUP BY task_id
+       GROUP BY task_id, peer_id
        HAVING dispatch_count > ?`,
-  ).all(cutoffIso, SUPERVISOR_MAX_REDISPATCHES_PER_TASK);
+  ).all(UNKNOWN_PEER_ID, cutoffIso, SUPERVISOR_MAX_REDISPATCHES_PER_TASK);
 
-  const quarantined: Array<{ task_id: string; directive_id: string; dispatch_count: number }> = [];
+  const quarantined: Array<{ task_id: string; directive_id: string; dispatch_count: number; peer_id: string }> = [];
   for (const r of rows) {
     // Skip if the task already has any terminal event in the window —
     // the scheduler's consecutive_bridge_failures cap may already have
@@ -222,6 +241,7 @@ export const detectRedispatchStorm = (
         payload: {
           reason: "supervisor_redispatch_storm",
           dispatch_count: r.dispatch_count,
+          peer_id: r.peer_id,
           window_ms: SUPERVISOR_REDISPATCH_WINDOW_MS,
           threshold: SUPERVISOR_MAX_REDISPATCHES_PER_TASK,
         } as JsonValue,
@@ -235,6 +255,7 @@ export const detectRedispatchStorm = (
           pathology: "redispatch_storm",
           corrective_event: "task_failed",
           dispatch_count: r.dispatch_count,
+          peer_id: r.peer_id,
           threshold: SUPERVISOR_MAX_REDISPATCHES_PER_TASK,
           window_ms: SUPERVISOR_REDISPATCH_WINDOW_MS,
         } as JsonValue,

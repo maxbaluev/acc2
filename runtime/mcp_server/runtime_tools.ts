@@ -104,8 +104,13 @@ export const handleDispatchReadyTask = async (
   if (!node) {
     return { ok: false, error: "task_not_found_in_dag" };
   }
+  // Thread the request's owning peer_id (amendment 34JT5W47) so the emitted
+  // brain_dispatched carries it and the supervisor groups redispatch-storm
+  // windows by peer. ctx.peer is the resolved ingress envelope (the explicit
+  // unknown-peer fallback when the caller did not self-identify).
   const result = await dispatchReadyTask(ctx.db, node, {
     fixtureTargetPath: args.fixture_target_path,
+    peerId: ctx.peer?.peer_id ?? null,
   });
   return {
     ok: true,

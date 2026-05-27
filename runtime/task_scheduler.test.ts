@@ -27,6 +27,7 @@ import { __resetHandshakePermitsForTest } from "./bridge/opencode";
 import { runTelemetryEvictionSweep } from "./archival_worker";
 import { activationListenerCount, clearAllActivationListeners } from "./activation_bus";
 import { ResourceGovernor, _setResourceGovernorForTests } from "./resource_governor";
+import { UNKNOWN_PEER_ID } from "./peer_registry";
 
 afterAll(() => {
   closeDb();
@@ -503,21 +504,25 @@ describe("task_scheduler", () => {
     }
   }, 60_000);
 
-  test("GLOBAL governor cap blocks new opencode_brain dispatch past the budget (queues, no launch)", async () => {
+  // Amendment 34JT5W47: brain admission is PER PEER, not a global cap shared
+  // across peers. A peer AT its per-peer budget queues (no launch); a DIFFERENT
+  // peer with headroom is unaffected.
+  test("PER-PEER governor cap blocks a peer past ITS budget (queues, no launch)", async () => {
     const db = openDb(":memory:");
     const tempDir = mkdtempSync(join(tmpdir(), "acc2-sched-gov-cap-"));
     writeFileSync(join(tempDir, "a.txt"), "// TODO", "utf-8");
     try {
       const { taskId } = await openFixtureDCountTodos(db, tempDir);
-      // Install a governor whose GLOBAL brain_slots budget is already exhausted
-      // by an unrelated actor, so this task's brain dispatch cannot be admitted.
-      const gov = new ResourceGovernor({ budgets: { global: { brain_slots: 1 }, perActor: { brain_slots: 99 } } });
-      const occupy = gov.requestLease({ origin: "other", dispatch_id: "occupant" }, { brain_slots: 1 });
-      expect(occupy.admitted).toBe(true); // global cap now full
+      // The fixture directive has no registered peer → it resolves to the
+      // explicit unknown-peer bucket. Install a governor with a per-peer brain
+      // budget of 1 and pre-occupy that SAME bucket so this task is refused.
+      const gov = new ResourceGovernor({ perPeerBrainBudget: 1 });
+      const occupy = gov.requestBrainSlot(UNKNOWN_PEER_ID);
+      expect(occupy.admitted).toBe(true); // unknown-peer bucket now full
       _setResourceGovernorForTests(gov);
 
       const tick = await schedulerTick(db, { fixtureTargetPath: tempDir, maxConcurrent: 5 });
-      // The scheduler MUST NOT launch the brain dispatch past the global cap.
+      // The scheduler MUST NOT launch the brain dispatch past the per-peer cap.
       expect(tick.dispatched).not.toContain(taskId);
       expect(tick.brain_in_flight).not.toContain(taskId);
       expect(tick.skipped_concurrency_cap).toContain(taskId);
@@ -526,17 +531,61 @@ describe("task_scheduler", () => {
         .query("SELECT payload FROM events WHERE task_id = ? AND kind = 'constitutional_gate_decision' ORDER BY ts DESC LIMIT 1")
         .get(taskId) as { payload: string } | null;
       expect(gate).not.toBeNull();
-      const payload = JSON.parse(gate!.payload) as { gate?: string; reason?: string; cap_source?: string; cap_kind?: string };
+      const payload = JSON.parse(gate!.payload) as { gate?: string; reason?: string; cap_source?: string; cap_kind?: string; peer_id?: string };
       expect(payload.gate).toBe("brain_concurrency_cap");
       expect(payload.reason).toBe("queued_at_cap");
-      expect(payload.cap_source).toBe("global_resource_governor");
-      expect(payload.cap_kind).toBe("global");
+      expect(payload.cap_source).toBe("per_peer_brain_budget");
+      expect(payload.cap_kind).toBe("per_peer");
+      expect(payload.peer_id).toBe(UNKNOWN_PEER_ID);
 
-      // Free the global slot → next tick admits the previously-queued brain.
-      gov.releaseLease(occupy.lease_id);
+      // Free that peer's slot → next tick admits the previously-queued brain.
+      gov.releaseBrainSlot(occupy.lease_id);
       const retry = await schedulerTick(db, { fixtureTargetPath: tempDir, maxConcurrent: 5 });
       expect(retry.dispatched).toContain(taskId);
       expect(retry.brain_in_flight).toContain(taskId);
+    } finally {
+      _setResourceGovernorForTests(null);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  // (a) one peer AT its cap does NOT block another peer's admission — at the
+  // scheduler boundary. The fixture directive (no registered peer) resolves to
+  // the unknown-peer bucket; a DIFFERENT peer ("peer-OTHER") saturated to its
+  // cap must leave the fixture's admission UNAFFECTED. Contrast with the
+  // "blocks" test above where the SAME (unknown) bucket was saturated → queued.
+  test("a peer at its cap does NOT block a DIFFERENT peer's brain dispatch", async () => {
+    const db = openDb(":memory:");
+    const tempDir = mkdtempSync(join(tmpdir(), "acc2-sched-perpeer-isolate-"));
+    writeFileSync(join(tempDir, "a.txt"), "// TODO", "utf-8");
+    try {
+      const { taskId } = await openFixtureDCountTodos(db, tempDir);
+      // Per-peer budget of 1; saturate a DIFFERENT peer than the fixture's
+      // owning (unknown) peer. peer-OTHER at cap must not touch the unknown
+      // bucket's headroom.
+      const gov = new ResourceGovernor({ perPeerBrainBudget: 1 });
+      expect(gov.requestBrainSlot("peer-OTHER").admitted).toBe(true);
+      _setResourceGovernorForTests(gov);
+
+      const tick = await schedulerTick(db, { fixtureTargetPath: tempDir, maxConcurrent: 5 });
+      // The fixture task is UNAFFECTED by peer-OTHER being at cap — it is
+      // admitted (dispatched) and NOT queued at the per-peer cap.
+      expect(tick.dispatched).toContain(taskId);
+      expect(tick.skipped_concurrency_cap).not.toContain(taskId);
+      // No per-peer brain-cap queue gate fired for this task (its own bucket
+      // had headroom; peer-OTHER's saturation was irrelevant to it).
+      const queuedGate = db
+        .query(
+          `SELECT 1 FROM events
+            WHERE task_id = ? AND kind = 'constitutional_gate_decision'
+              AND json_extract(payload, '$.gate') = 'brain_concurrency_cap'
+              AND json_extract(payload, '$.reason') = 'queued_at_cap'
+            LIMIT 1`,
+        )
+        .get(taskId);
+      expect(queuedGate).toBeNull();
+      // peer-OTHER's slot is still held — its saturation did not leak across peers.
+      expect(gov.peerBrainUsage("peer-OTHER")).toBe(1);
     } finally {
       _setResourceGovernorForTests(null);
       rmSync(tempDir, { recursive: true, force: true });

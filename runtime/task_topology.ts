@@ -28,9 +28,46 @@
 // process-local and advisory — a daemon restart simply repopulates it on first
 // read; it is never the source of truth.
 
-import type { Database } from "bun:sqlite";
+import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { TaskEdgeKind } from "../substrate/types";
 import { closedDirectiveIds } from "./directive_closure";
+import { attachedArchiveSchemas } from "../substrate/db";
+
+// ── Tier-spanning event read (hot + attached cold archives) ────────────────
+//
+// The task DAG (task_node_opened / task_edge_recorded) is part of the credit
+// spine. The narrowed ALWAYS_KEEP (archival_worker.ts) now lets those rows age
+// into a sibling `state-archive-YYYY-MM.db` that `attachArchives` ATTACHes
+// read-only as an `archive_*` schema. A hot-only `FROM events` read would then
+// return an EMPTY DAG for an aged directive → dense closure credit finds no
+// contributors. We mirror the established pattern in dense_closure_credit.ts /
+// credit.ts / events.ts: UNION hot `events` with every attached
+// `<schema>.events`. For the common all-hot directive the archive union returns
+// nothing extra, so the read stays bounded and cheap.
+const eventTables = (db: Database): string[] => [
+  "events",
+  ...attachedArchiveSchemas(db).map((schema) => `${schema}.events`),
+];
+
+const selectEventRowsAcrossTiers = <T extends Record<string, unknown>>(
+  db: Database,
+  selectCols: string,
+  whereSql: string,
+  params: SQLQueryBindings[] = [],
+): T[] => {
+  const rows: T[] = [];
+  for (const table of eventTables(db)) {
+    try {
+      rows.push(
+        ...(db.query(`SELECT ${selectCols} FROM ${table} WHERE ${whereSql}`).all(...params) as T[]),
+      );
+    } catch (err) {
+      // A malformed / partially-attached archive must not break the hot read.
+      if (table === "events") throw err;
+    }
+  }
+  return rows;
+};
 
 export type TaskNodeStatus = "pending" | "ready" | "in_progress" | "committed" | "failed";
 
@@ -152,11 +189,15 @@ export const readDagForDirectiveReplay = (
   db: Database,
   directiveId: string,
 ): TaskDag => {
-  const rows = db
-    .query(
-      "SELECT id, task_id, directive_id, parent_task_id, kind, payload FROM events WHERE directive_id = ? ORDER BY ts ASC",
-    )
-    .all(directiveId) as EventRow[];
+  // Tier-spanning: union hot + every attached cold archive, then order by ts
+  // (the union helper does not order across tiers, so we sort here to preserve
+  // the original ORDER BY ts ASC replay semantics).
+  const rows = selectEventRowsAcrossTiers<EventRow & { ts: string }>(
+    db,
+    "id, task_id, directive_id, parent_task_id, kind, payload, ts",
+    "directive_id = ?",
+    [directiveId],
+  ).sort((a, b) => String(a.ts ?? "").localeCompare(String(b.ts ?? ""))) as EventRow[];
 
   const eventsByTask = new Map<string, EventRow[]>();
   const nodeRows: EventRow[] = [];
@@ -208,9 +249,11 @@ export const readyTasks = (db: Database, directiveId?: string): TaskNode[] => {
   if (directiveId) {
     dagDirectiveIds.add(directiveId);
   } else {
-    const rows = db
-      .query("SELECT DISTINCT directive_id FROM events WHERE kind = 'task_node_opened'")
-      .all() as Array<{ directive_id: string }>;
+    const rows = selectEventRowsAcrossTiers<{ directive_id: string }>(
+      db,
+      "DISTINCT directive_id",
+      "kind = 'task_node_opened'",
+    );
     for (const r of rows) dagDirectiveIds.add(r.directive_id);
   }
 
@@ -243,11 +286,11 @@ export const readyTasks = (db: Database, directiveId?: string): TaskNode[] => {
  *  depth cap (defaults to 5 in §3.7). */
 export const refinementDepth = (db: Database, taskId: string): number => {
   // Read every refines edge anywhere — Phase D directives are tiny.
-  const rows = db
-    .query(
-      "SELECT payload FROM events WHERE kind = 'task_edge_recorded'",
-    )
-    .all() as Array<{ payload: string }>;
+  const rows = selectEventRowsAcrossTiers<{ payload: string }>(
+    db,
+    "payload",
+    "kind = 'task_edge_recorded'",
+  );
   const incoming = new Map<string, string>(); // to_task -> from_task (refines)
   for (const r of rows) {
     try {

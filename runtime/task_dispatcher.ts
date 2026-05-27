@@ -75,6 +75,7 @@ import { recordDispatch, recordActionResidual } from "./metrics";
 import { extractRecipeFromCommit } from "../substrate/extractors";
 import { maybeRunGenerateSelect } from "./generate_select_dispatch";
 import { emitRefinementContinuation } from "./dispatch_continuation";
+import { UNKNOWN_PEER_ID } from "./peer_registry";
 
 const REFINEMENT_DEPTH_CAP = 5;
 const TREE_SEARCH_FANOUT_THRESHOLD = 5;
@@ -183,6 +184,13 @@ type DispatchDeps = {
    *  and source artifact ids to the composer. Defaults to
    *  artifact_store.readDeliverableGroundbase when omitted. */
   retrieveDeliverableGroundbase?: (db: Database, task: TaskNode) => Promise<import("./prompt_composer").DeliverableGroundbase | null>;
+  /** Owning-peer identity for this dispatch (amendment 34JT5W47). Resolved by
+   *  the scheduler from peer_registry ingress identity (the explicit
+   *  unknown-peer fallback bucket when no peer self-identified). Stamped onto
+   *  the emitted `brain_dispatched` payload so the supervisor's redispatch-storm
+   *  detector can GROUP its rate window BY peer_id — one peer's refinement chain
+   *  trips only ITS storm guard, never another peer's. */
+  peerId?: string | null;
 };
 
 const readEventsForDispatch = async (db: Database, dispatchId: string): Promise<Event[]> => {
@@ -263,13 +271,17 @@ export const dispatchReadyTask = async (
   const bridge = deps.bridge ?? opencodeQuery;
   const runArtifact = deps.runArtifact ?? runArtifactForRuntime;
 
-  // 1. brain_dispatched
+  // 1. brain_dispatched — carries the owning peer_id (amendment 34JT5W47) so the
+  // supervisor's redispatch-storm detector groups its dispatch-rate window BY
+  // peer. Absent peer → the explicit unknown-peer fallback bucket (never silently
+  // attributed to another peer), consistent with peer_registry ingress defaults.
+  const dispatchPeerId = typeof deps.peerId === "string" && deps.peerId.length > 0 ? deps.peerId : UNKNOWN_PEER_ID;
   emitEvent(db, {
     kind: "brain_dispatched",
     substrate_origin: "substrate_auto",
     directive_id: task.directive_id,
     task_id: task.id,
-    payload: { dispatch_id: dispatchId, task_id: task.id, route_pending: true } as JsonValue,
+    payload: { dispatch_id: dispatchId, task_id: task.id, peer_id: dispatchPeerId, route_pending: true } as JsonValue,
   });
 
   // Record the timestamp BEFORE the bridge fires so we can collect every event

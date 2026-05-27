@@ -8,6 +8,10 @@ import {
   actorKey,
   actorFromContext,
   UNKNOWN_ACTOR_KEY,
+  PEER_UNKNOWN_BUCKET,
+  peerBrainBucket,
+  DEFAULT_PER_PEER_BRAIN_BUDGET,
+  DEFAULT_GLOBAL_BUDGET,
   ensureGovernorLedgerTable,
   recordGovernorDecision,
   type ActorId,
@@ -144,6 +148,86 @@ describe("resource governor — graceful admission (no crash at cap)", () => {
     for (let i = 0; i < 100; i++) {
       expect(gov.requestLease({ origin: "x", dispatch_id: `d${i}` }, { event_streams: 1 }).admitted).toBe(true);
     }
+  });
+});
+
+describe("resource governor — PER-PEER brain admission (amendment 34JT5W47)", () => {
+  test("brain_slots is NOT a global budget dimension — no cross-peer cap", () => {
+    // The whole point: there is no shared brain_slots ceiling across peers.
+    expect((DEFAULT_GLOBAL_BUDGET as Record<string, number>).brain_slots).toBeUndefined();
+  });
+
+  test("peerBrainBucket: present peer keys on itself; absent → explicit unknown bucket", () => {
+    expect(peerBrainBucket("peer-A")).toBe("peer-A");
+    expect(peerBrainBucket(null)).toBe(PEER_UNKNOWN_BUCKET);
+    expect(peerBrainBucket(undefined)).toBe(PEER_UNKNOWN_BUCKET);
+    expect(peerBrainBucket("")).toBe(PEER_UNKNOWN_BUCKET);
+  });
+
+  test("(a) peer A AT ITS CAP does NOT block peer B's admission", () => {
+    const gov = new ResourceGovernor({ perPeerBrainBudget: 2 });
+    // Peer A fills its own per-peer budget.
+    expect(gov.requestBrainSlot("peer-A").admitted).toBe(true);
+    expect(gov.requestBrainSlot("peer-A").admitted).toBe(true);
+    const aRefused = gov.requestBrainSlot("peer-A");
+    expect(aRefused.admitted).toBe(false);
+    expect(aRefused.cap_kind).toBe("per_peer");
+    expect(aRefused.queued_reason).toBe("per_peer_brain_budget_exhausted");
+    expect(aRefused.actor_key).toBe("peer-A");
+    // Peer B is UNAFFECTED — gets its full per-peer share.
+    expect(gov.requestBrainSlot("peer-B").admitted).toBe(true);
+    expect(gov.requestBrainSlot("peer-B").admitted).toBe(true);
+    expect(gov.peerBrainUsage("peer-B")).toBe(2);
+    expect(gov.peerBrainUsage("peer-A")).toBe(2);
+  });
+
+  test("(c) a single peer exceeding ITS budget IS still refused (per-peer protection preserved)", () => {
+    const gov = new ResourceGovernor({ perPeerBrainBudget: 3 });
+    const admitted: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const r = gov.requestBrainSlot("runaway");
+      expect(r.admitted).toBe(true);
+      admitted.push(r.lease_id!);
+    }
+    // The runaway peer's 4th request is REFUSED — a single peer is still bounded.
+    for (let i = 0; i < 50; i++) {
+      expect(gov.requestBrainSlot("runaway").admitted).toBe(false);
+    }
+    expect(gov.peerBrainUsage("runaway")).toBe(3);
+    // Releasing frees that peer's slot; the queued brain re-admits.
+    gov.releaseBrainSlot(admitted[0]);
+    expect(gov.requestBrainSlot("runaway").admitted).toBe(true);
+  });
+
+  test("(d) unknown / absent peer routes to the explicit fallback bucket (one shared share)", () => {
+    const gov = new ResourceGovernor({ perPeerBrainBudget: 2 });
+    expect(gov.requestBrainSlot(null).admitted).toBe(true);
+    expect(gov.requestBrainSlot(undefined).admitted).toBe(true);
+    // The unknown bucket is bounded to ONE per-peer share — anonymous flood
+    // cannot exceed it, and cannot starve identified peers.
+    const refused = gov.requestBrainSlot("");
+    expect(refused.admitted).toBe(false);
+    expect(refused.actor_key).toBe(PEER_UNKNOWN_BUCKET);
+    // An identified peer is unaffected by the unknown-bucket saturation.
+    expect(gov.requestBrainSlot("identified").admitted).toBe(true);
+    expect(gov.peerBrainUsage(null)).toBe(2);
+    expect(gov.peerBrainUsage(PEER_UNKNOWN_BUCKET)).toBe(2);
+  });
+
+  test("release is idempotent and never underflows the per-peer ledger", () => {
+    const gov = new ResourceGovernor({ perPeerBrainBudget: 1 });
+    const r = gov.requestBrainSlot("p");
+    gov.releaseBrainSlot(r.lease_id);
+    gov.releaseBrainSlot(r.lease_id); // double-release
+    gov.releaseBrainSlot("nonexistent");
+    gov.releaseBrainSlot(null);
+    expect(gov.peerBrainUsage("p")).toBe(0);
+    expect(gov.requestBrainSlot("p").admitted).toBe(true);
+  });
+
+  test("default per-peer brain budget is the deterministic fallback", () => {
+    const gov = new ResourceGovernor();
+    expect(gov.perPeerBrainBudgetSnapshot()).toBe(DEFAULT_PER_PEER_BRAIN_BUDGET);
   });
 });
 

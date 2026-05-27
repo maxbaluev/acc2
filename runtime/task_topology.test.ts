@@ -1,4 +1,8 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { Database as Sqlite } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { closeDb, openDb } from "../substrate/db";
 import { emitEvent } from "./events";
 import {
@@ -191,5 +195,70 @@ describe("task_topology", () => {
     const third = readDagForDirective(db, dir);
     expect(third).not.toBe(first);
     expect(third).toEqual(readDagForDirectiveReplay(db, dir));
+  });
+
+  // ARCHIVE-AWARE (credit spine): once DAG rows (task_node_opened /
+  // task_edge_recorded) age into a cold `state-archive-YYYY-MM.db` (which the
+  // narrowed ALWAYS_KEEP now permits), a hot-only read would return an EMPTY
+  // DAG → dense closure credit finds no contributors. The DAG build must UNION
+  // hot events with every attached cold archive so the DAG survives archival.
+  test("DAG includes nodes + edges that live in an attached cold archive", () => {
+    // File-backed DB so a sibling state-archive-*.db can be ATTACHed on open.
+    const tmp = mkdtempSync(join(tmpdir(), "acc2-tasktopo-archive-"));
+    const dbPath = join(tmp, "state.db");
+    try {
+      const db = openDb(dbPath);
+      const dir = newId();
+      const a = newId();
+      const b = newId();
+      const opened = emitEvent(db, { kind: "task_node_opened", directive_id: dir, task_id: a, payload: { goal: "A" } });
+      const openedB = emitEvent(db, { kind: "task_node_opened", directive_id: dir, task_id: b, payload: { goal: "B" } });
+      const edge = emitEvent(db, {
+        kind: "task_edge_recorded",
+        directive_id: dir,
+        task_id: b,
+        payload: { from_task: a, to_task: b, kind: "requires" },
+      });
+
+      // Move the DAG rows into a cold archive sibling and delete from hot.
+      const archivePath = join(tmp, "state-archive-2026-01.db");
+      const arch = new Sqlite(archivePath, { create: true, strict: true });
+      const archiveRowAndDeleteHot = (id: string): void => {
+        const row = db.query("SELECT * FROM events WHERE id = ?").get(id) as Record<string, unknown>;
+        const cols = Object.keys(row);
+        arch.exec(`CREATE TABLE IF NOT EXISTS events (${cols.map((c) => `${c} ${c === "id" ? "TEXT PRIMARY KEY" : "TEXT"}`).join(", ")})`);
+        arch.query(`INSERT INTO events (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(...cols.map((c) => row[c] as never));
+        db.run("DELETE FROM events WHERE id = ?", [id]);
+      };
+      archiveRowAndDeleteHot(opened.id);
+      archiveRowAndDeleteHot(openedB.id);
+      archiveRowAndDeleteHot(edge.id);
+      arch.close();
+
+      // Reopen so attachArchives picks up the new sibling, and clear the memo.
+      closeDb(dbPath);
+      const db2 = openDb(dbPath);
+      _resetTaskTopologyCacheForTests();
+
+      // Hot `events` now holds NONE of the DAG rows — the tier-spanning union
+      // must still recover the two nodes and the requires edge from cold.
+      const dag = readDagForDirective(db2, dir);
+      expect(dag.nodes.map((n) => n.id).sort()).toEqual([a, b].sort());
+      expect(dag.edges).toHaveLength(1);
+      expect(dag.edges[0]!.kind).toBe("requires");
+      expect(dag.edges[0]!.from_task).toBe(a);
+      expect(dag.edges[0]!.to_task).toBe(b);
+
+      // readyTasks (no directive arg) must also see the archived directive via
+      // its tier-spanning DISTINCT directive_id scan, and refinementDepth's
+      // cold edge scan must observe the archived requires edge (depth 0 here).
+      const ready = readyTasks(db2).map((n) => n.id);
+      expect(ready).toContain(a); // a has no requires upstream
+      expect(ready).not.toContain(b); // b requires a, not yet committed
+      expect(refinementDepth(db2, a)).toBe(0);
+    } finally {
+      closeDb(dbPath);
+      try { rmSync(tmp, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
   });
 });

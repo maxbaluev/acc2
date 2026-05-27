@@ -91,14 +91,20 @@ export const actorKey = (actor: ActorId | null | undefined): string => {
 export type ResourceCost = Record<string, number>;
 
 /** Default GLOBAL budgets — the bounded total across ALL actors. These are the
- *  meltdown-stopping ceilings. Conservative-by-construction: the daemon runs a
- *  SINGLE event loop, so beyond a few concurrent brains it goes non-reactive.
- *  Deterministic; apply when no scored policy overrides them. */
+ *  meltdown-stopping ceilings for SHARED, non-peer-keyed resource dimensions.
+ *  Conservative-by-construction: the daemon runs a SINGLE event loop.
+ *  Deterministic; apply when no scored policy overrides them.
+ *
+ *  NOTE (amendment 34JT5W47): `brain_slots` is deliberately NOT a global
+ *  dimension. Brain-dispatch admission is keyed PER PEER (see PER_PEER_BRAIN_*
+ *  + requestBrainSlot) so one peer's refinement chain at capacity cannot block
+ *  another peer's brain dispatch. The OOM/reactivity ceiling that USED to be
+ *  encoded as the global brain_slots cap now lives in the scheduler's
+ *  host-RAM-derived computeBrainDispatchCap heap gate, which is a host-level
+ *  resource fact, not a cross-peer admission counter. Dispatch/handshake/SQL
+ *  dimensions remain global because they are genuinely shared substrate
+ *  resources, not per-peer cost. */
 export const DEFAULT_GLOBAL_BUDGET: Readonly<ResourceCost> = Object.freeze({
-  // Total concurrent brain dispatches across every terminal/brain. This is THE
-  // meltdown-stopper: opencode subprocesses are ~700MB RSS each, and the daemon
-  // event loop saturates past a handful. Matches DEFAULT_MAX_CONCURRENT (5).
-  brain_slots: 5,
   // Total concurrent dispatch slots (all lanes — replay/inline/brain).
   dispatch_slots: 8,
   // Total concurrent MCP handshake permits in flight.
@@ -107,16 +113,38 @@ export const DEFAULT_GLOBAL_BUDGET: Readonly<ResourceCost> = Object.freeze({
   sql_jobs: 256,
 });
 
+/** PER-PEER brain-dispatch budget (amendment 34JT5W47). Each peer gets its OWN
+ *  brain-slot allowance keyed by peer_id; a peer at its cap is refused while a
+ *  different peer with headroom is admitted. There is NO global brain_slots
+ *  cap shared across peers — that shared counter was the live failure: one
+ *  directive's refinement chain (peer A) tripped admission/storm because every
+ *  peer's dispatches counted against ONE global brain_slots counter.
+ *
+ *  A genuinely runaway SINGLE peer is still bounded: it cannot exceed its own
+ *  per-peer brain budget, so the meltdown protection is preserved PER PEER. */
+export const DEFAULT_PER_PEER_BRAIN_BUDGET = 3;
+
 /** Default PER-ACTOR quotas — the fair share. No single actor can take more
  *  than this of any dimension, so one terminal/brain cannot starve another even
  *  while global headroom exists. Set so a small number of actors can each get a
  *  meaningful slice without any one monopolising the global cap. */
 export const DEFAULT_PER_ACTOR_QUOTA: Readonly<ResourceCost> = Object.freeze({
-  brain_slots: 2,
+  // brain_slots intentionally absent — brain admission is keyed per peer_id via
+  // requestBrainSlot/DEFAULT_PER_PEER_BRAIN_BUDGET (amendment 34JT5W47), NOT via
+  // the actorKey-namespaced quota (which mixed origin/dispatch/directive).
   dispatch_slots: 4,
   brain_handshake_slots: 3,
   sql_jobs: 64,
 });
+
+/** Resolve the per-peer brain bucket key. A present, non-empty peer_id keys on
+ *  itself; an absent/empty peer routes to the explicit unknown-peer fallback
+ *  bucket — consistent with peer_registry's UNKNOWN_PEER_ID convention so an
+ *  un-identified caller is one well-known bucket, never silently attributed to
+ *  an identified peer. Deterministic: same peer_id → same bucket. */
+export const PEER_UNKNOWN_BUCKET = "peer-unknown";
+export const peerBrainBucket = (peerId: string | null | undefined): string =>
+  typeof peerId === "string" && peerId.length > 0 ? peerId : PEER_UNKNOWN_BUCKET;
 
 export type GovernorBudgets = {
   global: ResourceCost;
@@ -130,7 +158,7 @@ export type LeaseResult = {
    *  global cap (meltdown-stopper) or the per-actor quota (fairness gate). */
   queued_reason?: string;
   exhausted_resource?: string;
-  cap_kind?: "global" | "per_actor";
+  cap_kind?: "global" | "per_actor" | "per_peer";
   /** The actor key the lease was accounted under (for observability). */
   actor_key?: string;
   /** Suggested retry delay; the caller re-attempts next scheduler tick. */
@@ -162,12 +190,25 @@ export class ResourceGovernor {
   private nextLeaseSeq = 1;
   private retryAfterMs: number;
 
-  constructor(opts?: { budgets?: Partial<GovernorBudgets>; retryAfterMs?: number }) {
+  // ── PER-PEER brain admission (amendment 34JT5W47) ──────────────────────
+  // Brain-dispatch slots are accounted PER peer_id, NOT against a global
+  // brain_slots counter. peer bucket → in-flight brain-slot count; and
+  // brainLeaseId → the bucket it debited (for release). One peer at its cap
+  // never blocks another peer's admission.
+  private readonly perPeerBrainBudget: number;
+  private readonly perPeerBrainUsed = new Map<string, number>();
+  private readonly brainLeaseBucket = new Map<string, string>();
+
+  constructor(opts?: { budgets?: Partial<GovernorBudgets>; retryAfterMs?: number; perPeerBrainBudget?: number }) {
     this.budgets = {
       global: { ...DEFAULT_GLOBAL_BUDGET, ...(opts?.budgets?.global ?? {}) },
       perActor: { ...DEFAULT_PER_ACTOR_QUOTA, ...(opts?.budgets?.perActor ?? {}) },
     };
     this.retryAfterMs = opts?.retryAfterMs ?? 500;
+    const b = opts?.perPeerBrainBudget;
+    this.perPeerBrainBudget = typeof b === "number" && Number.isFinite(b) && b > 0
+      ? Math.floor(b)
+      : DEFAULT_PER_PEER_BRAIN_BUDGET;
   }
 
   /** Snapshot the effective budgets (deterministic fallback view). */
@@ -269,6 +310,66 @@ export class ResourceGovernor {
     }
   }
 
+  /** PER-PEER brain admission (amendment 34JT5W47). Admit ONE brain dispatch
+   *  for `peerId` if that peer is below its per-peer brain budget. A peer at
+   *  its cap is refused (cap_kind='per_peer') while a DIFFERENT peer with
+   *  headroom is admitted — one peer can never block another. An absent/empty
+   *  peerId routes to the explicit unknown-peer fallback bucket. There is NO
+   *  global brain_slots counter consulted here, so no admission decision
+   *  depends on a shared cross-peer cap. NEVER throws; NEVER mutates on refusal. */
+  requestBrainSlot(
+    peerId: string | null | undefined,
+    opts?: { governing_policy_id?: string | null },
+  ): LeaseResult {
+    const bucket = peerBrainBucket(peerId);
+    const used = this.perPeerBrainUsed.get(bucket) ?? 0;
+    if (used + 1 > this.perPeerBrainBudget) {
+      return {
+        admitted: false,
+        lease_id: null,
+        queued_reason: "per_peer_brain_budget_exhausted",
+        exhausted_resource: "brain_slots",
+        cap_kind: "per_peer",
+        actor_key: bucket,
+        retry_after_ms: this.retryAfterMs,
+        governing_policy_id: opts?.governing_policy_id ?? null,
+      };
+    }
+    const leaseId = `gov-brain-${this.nextLeaseSeq++}`;
+    this.perPeerBrainUsed.set(bucket, used + 1);
+    this.brainLeaseBucket.set(leaseId, bucket);
+    return {
+      admitted: true,
+      lease_id: leaseId,
+      cap_kind: "per_peer",
+      actor_key: bucket,
+      governing_policy_id: opts?.governing_policy_id ?? null,
+    };
+  }
+
+  /** Release a per-peer brain slot. Idempotent: releasing an unknown or
+   *  already-released brain lease is a harmless no-op (never underflows). */
+  releaseBrainSlot(leaseId: string | null | undefined): void {
+    if (!leaseId) return;
+    const bucket = this.brainLeaseBucket.get(leaseId);
+    if (!bucket) return;
+    this.brainLeaseBucket.delete(leaseId);
+    const used = this.perPeerBrainUsed.get(bucket) ?? 0;
+    const next = Math.max(0, used - 1);
+    if (next === 0) this.perPeerBrainUsed.delete(bucket);
+    else this.perPeerBrainUsed.set(bucket, next);
+  }
+
+  /** In-flight brain-slot count for one peer bucket (observability + audit). */
+  peerBrainUsage(peerId: string | null | undefined): number {
+    return this.perPeerBrainUsed.get(peerBrainBucket(peerId)) ?? 0;
+  }
+
+  /** Effective per-peer brain budget (deterministic fallback view). */
+  perPeerBrainBudgetSnapshot(): number {
+    return this.perPeerBrainBudget;
+  }
+
   /** Global in-flight usage across all actors (observability). */
   globalUsage(): ResourceCost {
     return { ...this.globalUsed };
@@ -294,6 +395,8 @@ export class ResourceGovernor {
   reset(): void {
     this.leases.clear();
     this.perActorUsed.clear();
+    this.perPeerBrainUsed.clear();
+    this.brainLeaseBucket.clear();
     for (const k of Object.keys(this.globalUsed)) delete this.globalUsed[k];
     this.nextLeaseSeq = 1;
   }
@@ -367,7 +470,7 @@ export const recordGovernorDecision = (
     actor_key: string;
     cost: ResourceCost;
     admitted: boolean;
-    cap_kind?: "global" | "per_actor" | null;
+    cap_kind?: "global" | "per_actor" | "per_peer" | null;
     governing_policy_id?: string | null;
     lease_id?: string | null;
   },
