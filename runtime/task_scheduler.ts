@@ -319,6 +319,23 @@ export const _injectBrainInFlightForTests = (taskId: string): void => {
   IN_FLIGHT_BRAIN.add(taskId);
 };
 
+/** Test-only hook: seed an IN_FLIGHT_DIRECTIVE slot without a tracked promise,
+ *  so a test can reproduce a phantom per-directive slot left behind by a
+ *  refused/terminalized dispatch and assert the per-tick reconcile evicts it. */
+export const _injectDirectiveInFlightForTests = (taskId: string, directiveId: string): void => {
+  IN_FLIGHT_DIRECTIVE.set(taskId, directiveId);
+};
+
+/** Test-only accessor: how many in-memory slots a directive currently holds
+ *  (the exact quantity the per-directive cap gate computes as perDirCount). */
+export const _directiveInFlightCountForTests = (directiveId: string): number => {
+  let count = 0;
+  for (const d of IN_FLIGHT_DIRECTIVE.values()) {
+    if (d === directiveId) count++;
+  }
+  return count;
+};
+
 /** (task_id, gate_name) pairs that have already emitted a
  *  constitutional_gate_decision in the current queueing cycle. Without this
  *  dedupe the scheduler tick (every 500ms) would re-emit gate events for
@@ -662,7 +679,22 @@ const reconcileBrainInFlightSlots = (db: Database): void => {
       });
     } catch { /* swallow */ }
   }
-  if (IN_FLIGHT_BRAIN.size === 0) return;
+  // Liveness criterion (shared by the IN_FLIGHT_BRAIN AND IN_FLIGHT_DIRECTIVE
+  // evictions below): a task is genuinely live iff its dispatch promise is
+  // still tracked in IN_FLIGHT *or* it has an open (hot, un-closed)
+  // brain_dispatched row per openBrainDispatchTaskIdsFromSql. Anything else in
+  // the in-memory bookkeeping is a phantom slot left behind by a dispatch that
+  // was attempted then terminalized (refused orphan / dispatcher_violation /
+  // task_abandoned) without clearing its slot.
+  //
+  // We must reconcile IN_FLIGHT_DIRECTIVE even when IN_FLIGHT_BRAIN is empty:
+  // an admission-guard refusal can terminalize a task and leave its directive
+  // slot stuck while no brain ever entered flight. A phantom IN_FLIGHT_DIRECTIVE
+  // entry keeps perDirCount (computed by iterating IN_FLIGHT_DIRECTIVE.values()
+  // in the per-directive cap gate) ≥ cap forever, so the scheduler re-emits
+  // scheduler_directive_in_flight_at_cap for that directive every tick —
+  // the busy-loop / ledger re-bloat this reconcile must self-heal.
+  if (IN_FLIGHT_BRAIN.size === 0 && IN_FLIGHT_DIRECTIVE.size === 0) return;
   const live = new Set<string>(IN_FLIGHT.keys());
   for (const taskId of openBrainDispatchTaskIdsFromSql(db)) live.add(taskId);
 
@@ -672,19 +704,50 @@ const reconcileBrainInFlightSlots = (db: Database): void => {
     IN_FLIGHT_BRAIN.delete(taskId);
     evicted.push(taskId);
   }
-  if (evicted.length === 0) return;
+
+  // Mirror the IN_FLIGHT_BRAIN eviction onto IN_FLIGHT_DIRECTIVE: each entry is
+  // keyed task_id → directive_id, so evict by the SAME liveness criterion. A
+  // phantom directive slot (no live promise, no open brain_dispatched) is freed
+  // here, and its parallel per-task bookkeeping (IN_FLIGHT / IN_FLIGHT_BRAIN /
+  // parent / resource / exclusive-resource / gov-lease) is cleared via
+  // clearInFlightTask so nothing else strands. Genuinely live dispatches are
+  // never touched.
+  const evictedDirectives: string[] = [];
+  for (const taskId of Array.from(IN_FLIGHT_DIRECTIVE.keys())) {
+    if (live.has(taskId)) continue;
+    clearInFlightTask(taskId, db);
+    evictedDirectives.push(taskId);
+  }
+
+  if (evicted.length === 0 && evictedDirectives.length === 0) return;
+  // Re-arm the gate dedupe so the per-directive (and brain-cap) gates
+  // re-notify fresh now that the phantom slots are gone.
   GATE_NOTIFIED.clear();
   try {
-    emitEvent(db, {
-      kind: "dispatch_recovered_orphan",
-      substrate_origin: "substrate_auto",
-      payload: {
-        reason: "evicted_phantom_brain_in_flight_slots",
-        task_ids: evicted,
-        in_flight: Array.from(IN_FLIGHT.keys()),
-        brain_in_flight: Array.from(IN_FLIGHT_BRAIN.keys()),
-      } as JsonValue,
-    });
+    if (evicted.length > 0) {
+      emitEvent(db, {
+        kind: "dispatch_recovered_orphan",
+        substrate_origin: "substrate_auto",
+        payload: {
+          reason: "evicted_phantom_brain_in_flight_slots",
+          task_ids: evicted,
+          in_flight: Array.from(IN_FLIGHT.keys()),
+          brain_in_flight: Array.from(IN_FLIGHT_BRAIN.keys()),
+        } as JsonValue,
+      });
+    }
+    if (evictedDirectives.length > 0) {
+      emitEvent(db, {
+        kind: "dispatch_recovered_orphan",
+        substrate_origin: "substrate_auto",
+        payload: {
+          reason: "evicted_phantom_directive_in_flight_slots",
+          task_ids: evictedDirectives,
+          in_flight: Array.from(IN_FLIGHT.keys()),
+          directive_in_flight: Array.from(IN_FLIGHT_DIRECTIVE.values()),
+        } as JsonValue,
+      });
+    }
   } catch { /* swallow */ }
 };
 

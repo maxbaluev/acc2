@@ -16,6 +16,8 @@ import {
   setSchedulerDraining,
   _setDispatchReadyTaskForTests,
   _injectBrainInFlightForTests,
+  _injectDirectiveInFlightForTests,
+  _directiveInFlightCountForTests,
   _setHostAvailableReaderForTests,
 } from "./task_scheduler";
 import { FIXTURE_D_DIRECTIVE_TEXT, openFixtureDCountTodos } from "./fixtures/d_count_todos";
@@ -2191,6 +2193,61 @@ describe("brain dispatch SQL liveness reconciliation", () => {
       .query("SELECT id FROM events WHERE kind = 'brain_dispatch_closed' AND json_extract(payload, '$.dispatch_id') = ?")
       .get(dispatchId) as { id: string } | null;
     expect(close).toBeNull();
+  });
+
+  test("phantom IN_FLIGHT_DIRECTIVE slot (no live brain_dispatched) is evicted by reconcile; perDirCount drops to 0", async () => {
+    const db = openDb(":memory:");
+    setBootSessionToken("current-session");
+    const phantomTask = newId();
+    const phantomDirective = newId();
+    // Reproduce the busy-loop precondition: a dispatch was attempted then
+    // terminalized (refused orphan / dispatcher_violation) WITHOUT clearing its
+    // in-memory directive slot. No promise in IN_FLIGHT, no open brain_dispatched
+    // row — yet the per-directive cap gate would count it forever.
+    _injectDirectiveInFlightForTests(phantomTask, phantomDirective);
+    expect(_directiveInFlightCountForTests(phantomDirective)).toBe(1);
+
+    await schedulerTick(db, { maxConcurrent: 1 });
+
+    // Self-healed: the phantom slot is gone, so perDirCount is back to 0 and the
+    // scheduler stops re-emitting scheduler_directive_in_flight_at_cap for it.
+    expect(_directiveInFlightCountForTests(phantomDirective)).toBe(0);
+    const recovered = db
+      .query(
+        "SELECT id FROM events WHERE kind = 'dispatch_recovered_orphan' AND json_extract(payload, '$.reason') = 'evicted_phantom_directive_in_flight_slots'",
+      )
+      .get() as { id: string } | null;
+    expect(recovered).not.toBeNull();
+  });
+
+  test("IN_FLIGHT_DIRECTIVE slot WITH a live (hot, un-closed) brain_dispatched is NOT evicted", async () => {
+    const db = openDb(":memory:");
+    setBootSessionToken("current-live-session");
+    const liveTask = newId();
+    const liveDirective = newId();
+    const dispatchId = newId();
+    // A genuinely live dispatch: open brain_dispatched row (no close), so
+    // openBrainDispatchTaskIdsFromSql reports it as live and the reconcile must
+    // preserve its directive slot.
+    emitEvent(db, {
+      kind: "brain_dispatched",
+      substrate_origin: "substrate_auto",
+      directive_id: liveDirective,
+      task_id: liveTask,
+      payload: {
+        dispatch_id: dispatchId,
+        session_token: "current-live-session",
+        subprocess_pid: process.pid,
+        started_at_ms: Date.now(),
+      },
+    });
+    _injectDirectiveInFlightForTests(liveTask, liveDirective);
+    expect(_directiveInFlightCountForTests(liveDirective)).toBe(1);
+
+    await schedulerTick(db, { maxConcurrent: 1 });
+
+    // Surgical: the live dispatch's directive slot survives the reconcile.
+    expect(_directiveInFlightCountForTests(liveDirective)).toBe(1);
   });
 });
 
