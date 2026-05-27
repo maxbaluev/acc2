@@ -49,9 +49,10 @@ const resolveComposePrompt = async (): Promise<typeof composePrompt> => {
   }
 };
 import { decideDispatch, dispatchEvidencePayload } from "./dispatch_decider";
+import { requestJob } from "./claude_agent_job";
 import { recordInternalAct } from "./internal_act_projection";
 import { invokeVerifierWithMeta } from "./verifier_invocation";
-import { claudeCodeQuery, opencodeQuery, type BridgeRequest, type BridgeResult } from "./bridge/index";
+import { opencodeQuery, type BridgeRequest, type BridgeResult } from "./bridge/index";
 import type { TaskNode } from "./task_topology";
 import { refinementDepth } from "./task_topology";
 import { getArtifact, applyResidualOutcome, recordArtifactKill, maybeRetire } from "./artifact_store";
@@ -161,12 +162,6 @@ type DispatchDeps = {
   /** Override the bridge call — Phase D tests use this to inject the
    *  adversarial cycle-2 mock. Defaults to opencodeQuery. */
   bridge?: (req: BridgeRequest, db: Database) => Promise<BridgeResult>;
-  /** Override the Claude-Code executor bridge — increment 2 executor-selection
-   *  routes the `claude_agent` lane through this seam. Defaults to
-   *  `claudeCodeQuery` (which is itself ACC2_BRIDGE_MODE-aware, so tests stay
-   *  hermetic via the mock pin). Injected directly by unit tests that assert
-   *  the CC route spawns the bridge without paying real-subprocess cost. */
-  ccBridge?: (req: BridgeRequest, db: Database) => Promise<BridgeResult>;
   /** Test seam for dispatcher behavior assertions that should not pay runtime subprocess cost. */
   runArtifact?: (inv: UnifiedRuntimeInvocation) => Promise<UnifiedRuntimeObservation>;
   /** Optional fixture path threaded into the bridge request. The MVP fixture
@@ -266,7 +261,6 @@ export const dispatchReadyTask = async (
   const dispatchStartMs = Date.now();
   const violations: string[] = [];
   const bridge = deps.bridge ?? opencodeQuery;
-  const ccBridge = deps.ccBridge ?? claudeCodeQuery;
   const runArtifact = deps.runArtifact ?? runArtifactForRuntime;
 
   // 1. brain_dispatched
@@ -545,29 +539,42 @@ export const dispatchReadyTask = async (
   }
 
   if (effectiveRoute === "claude_agent" && decision.route === "claude_agent") {
-    // Symmetric executor-selection (increment 2/2, amendment AW5AY83Z):
-    // Claude Code is now a substrate-spawnable engine. When the scored
-    // executor_selection lane routes a leaf to `claude_agent`, spawn the CC
-    // bridge (runtime/bridge/claude.ts via the ACC2_BRIDGE_MODE-aware
-    // `claudeCodeQuery`) instead of merely queuing an external job. The
-    // `ccBridge` seam keeps tests hermetic — no real `claude` subprocess.
-    bridgeResult = await ccBridge(
-      {
-        prompt: task.goal,
-        taskId: task.id,
-        directiveId: task.directive_id,
-        fixtureTargetPath: deps.fixtureTargetPath,
-        dispatchId,
-      },
-      db,
-    );
-    const dispatchEvents = await readEventsSinceTs(db, dispatchStartedTs, task.id);
+    // PROTOCOL INVARIANT (Architecture.md §"Participation is symmetric"):
+    // the substrate MUST NOT spawn Claude Code programmatically. Every Claude
+    // intelligence — human-launched terminal or Claude-spawned worktree agent —
+    // participates as a registered PEER that drains work through MCP/substrate
+    // primitives. Executor-selection routing a leaf to the `claude_agent` lane
+    // therefore ENQUEUES a claude_agent_job (claude_agent_job_requested); a
+    // registered Claude peer claims it (claimJob) and reports its result back
+    // through the act envelope (completeJob → act_tuple_recorded). The
+    // substrate never shells out to `claude`. (Increment 2's direct CC-bridge
+    // spawn — amendment AW5AY83Z — was a protocol violation and is withdrawn;
+    // the dormant runtime/bridge/claude.ts spawn path stays unused by dispatch.)
+    const job = requestJob(db, {
+      directive_id: task.directive_id,
+      task_id: task.id,
+      intent: decision.job_intent,
+      target_files: decision.target_files,
+      acceptance_predicate: decision.acceptance_predicate as JsonValue,
+    });
+    emitEvent(db, {
+      kind: "brain_dispatch_closed",
+      substrate_origin: "substrate_auto",
+      directive_id: task.directive_id,
+      task_id: task.id,
+      context_refs: [job.id],
+      payload: {
+        dispatch_id: dispatchId,
+        reason: "claude_agent_job_requested",
+        job_id: job.job_id,
+        job_request_event_id: job.id,
+      } as JsonValue,
+    });
     return {
       dispatch_id: dispatchId,
       task_id: task.id,
-      events: dispatchEvents,
+      events: await readEventsSinceTs(db, dispatchStartedTs, task.id),
       violations: [],
-      bridge_result: bridgeResult,
     };
   }
 

@@ -1076,9 +1076,15 @@ describe("task_dispatcher", () => {
   });
 });
 
-// Increment 2/2 — CC bridge executor-selection + apply-routing wiring.
-// (amendments TRJRC1NZ, BDAXGS1M, 3VXVRDVK, 0MD1R9T8, AW5AY83Z, TP1BT1CN)
-describe("task_dispatcher CC executor route (increment 2/2)", () => {
+// Increment 2/2 — executor-selection + apply-routing wiring.
+// (amendments TRJRC1NZ, BDAXGS1M, 0MD1R9T8 — and the WITHDRAWAL of AW5AY83Z's
+//  direct CC-bridge spawn, which violated the symmetric-peer protocol.)
+//
+// PROTOCOL INVARIANT (Architecture.md §"Participation is symmetric"): the
+// substrate must NOT spawn Claude Code programmatically. A leaf routed to the
+// claude_agent lane is ENQUEUED as a claude_agent_job_requested event that a
+// registered Claude PEER drains over MCP — never a `claude -p` subprocess.
+describe("task_dispatcher claude_agent route enqueues a peer job (no CC spawn)", () => {
   // Seed a directive + an APPLY leaf task carrying the explicit executor_hint
   // so the decider's executor-selection routes it to the claude_agent lane.
   const seedApplyLeaf = (db: Database): { directiveId: string; taskId: string } => {
@@ -1110,45 +1116,22 @@ describe("task_dispatcher CC executor route (increment 2/2)", () => {
     return { directiveId, taskId };
   };
 
-  test("claude_agent route spawns the CC bridge via the mock seam (no real subprocess)", async () => {
+  test("claude_agent route emits claude_agent_job_requested and spawns NO subprocess", async () => {
     const db = openDb(":memory:");
     const { directiveId, taskId } = seedApplyLeaf(db);
     const ready = readyTasks(db, directiveId);
     const task = ready.find((r) => r.id === taskId)!;
     expect(task).toBeDefined();
 
-    // Spy ccBridge — proves the dispatcher routed through the CC executor seam
-    // WITHOUT launching any real `claude`/`opencode` subprocess.
-    let ccCalls = 0;
-    let opencodeCalls = 0;
-    const ccSpy = async (req: BridgeRequest, _db: Database): Promise<BridgeResult> => {
-      ccCalls += 1;
-      expect(req.taskId).toBe(taskId);
-      expect(req.directiveId).toBe(directiveId);
-      // The CC bridge would emit its own cc_dispatched row; emulate so the
-      // dispatch window has the lifecycle marker.
-      emitEvent(_db, {
-        kind: "cc_dispatched",
-        substrate_origin: "claude_code",
-        directive_id: req.directiveId,
-        task_id: req.taskId,
-        payload: { dispatch_id: req.dispatchId, engine: "claude_code" } as JsonValue,
-        invoker: "claude_code",
-      });
-      return { ok: true, final_response: "cc mock applied", usage: { tokens: 0 }, emitted_event_ids: [] };
-    };
-    const opencodeSpy = async (_req: BridgeRequest, _db: Database): Promise<BridgeResult> => {
-      opencodeCalls += 1;
-      return { ok: true, final_response: "opencode", usage: { tokens: 0 }, emitted_event_ids: [] };
+    // Inject a bridge spy that fails loudly if the dispatcher ever tried to
+    // run a brain subprocess for this lane (it must not — the peer drains it).
+    let bridgeCalls = 0;
+    const bridgeSpy = async (_req: BridgeRequest, _db: Database): Promise<BridgeResult> => {
+      bridgeCalls += 1;
+      return { ok: true, final_response: "should-not-run", usage: { tokens: 0 }, emitted_event_ids: [] };
     };
 
-    const result = await dispatchReadyTask(db, task, { ccBridge: ccSpy, bridge: opencodeSpy });
-
-    // The CC bridge was invoked exactly once; the opencode bridge was NOT.
-    expect(ccCalls).toBe(1);
-    expect(opencodeCalls).toBe(0);
-    expect(result.violations).toEqual([]);
-    expect(result.bridge_result?.ok).toBe(true);
+    const result = await dispatchReadyTask(db, task, { bridge: bridgeSpy });
 
     // The dispatch decided the claude_agent lane.
     const decided = db
@@ -1157,60 +1140,41 @@ describe("task_dispatcher CC executor route (increment 2/2)", () => {
     expect(decided).not.toBeNull();
     expect(JSON.parse(decided!.payload).route).toBe("claude_agent");
 
-    // The CC lifecycle row landed (proving the bridge seam ran).
+    // The leaf was ENQUEUED for a peer over the substrate, not executed.
+    const job = db
+      .query("SELECT payload FROM events WHERE kind = 'claude_agent_job_requested' AND task_id = ?")
+      .get(taskId) as { payload: string } | null;
+    expect(job).not.toBeNull();
+
+    // No CC subprocess lifecycle row, and NO brain bridge subprocess ran.
     const ccDispatched = db
       .query("SELECT COUNT(*) as c FROM events WHERE kind = 'cc_dispatched' AND task_id = ?")
       .get(taskId) as { c: number };
-    expect(ccDispatched.c).toBe(1);
+    expect(ccDispatched.c).toBe(0);
+    expect(bridgeCalls).toBe(0);
+    expect(result.violations).toEqual([]);
   }, 10_000);
 
-  test("a non-apply (design/research) leaf routes to opencode, NOT the CC bridge", async () => {
+  test("a non-apply (design/research) leaf routes to opencode, NOT the claude_agent peer lane", async () => {
     const db = openDb(":memory:");
     const { directiveId, taskId } = await openFixtureDCountTodos(db, "/tmp");
     const ready = readyTasks(db, directiveId);
     const task = ready[0]!;
 
-    let ccCalls = 0;
-    const ccSpy = async (_req: BridgeRequest, _db: Database): Promise<BridgeResult> => {
-      ccCalls += 1;
-      return { ok: true, final_response: "cc", usage: { tokens: 0 }, emitted_event_ids: [] };
-    };
     const act = inMemoryAct({ actionResult: { result: { count: 2 } }, verifierResidual: 0 });
-
-    const result = await dispatchReadyTask(db, task, { ...act, ccBridge: ccSpy });
-    // The CC bridge must NOT have been invoked for a design/research leaf.
-    expect(ccCalls).toBe(0);
+    const result = await dispatchReadyTask(db, task, act);
     expect(result.violations).toEqual([]);
 
     const decided = db
       .query("SELECT payload FROM events WHERE kind = 'dispatch_decided' AND task_id = ?")
       .get(taskId) as { payload: string } | null;
     expect(JSON.parse(decided!.payload).route).not.toBe("claude_agent");
-  }, 10_000);
 
-  test("the CC route uses claudeCodeQuery by default (ACC2_BRIDGE_MODE=mock keeps it hermetic)", async () => {
-    // No ccBridge injected → defaults to claudeCodeQuery, which is
-    // ACC2_BRIDGE_MODE-aware. Under the test preload (mock), it runs the
-    // hermetic claudeCodeQueryMock — never a real subprocess.
-    const db = openDb(":memory:");
-    const { directiveId, taskId } = seedApplyLeaf(db);
-    const ready = readyTasks(db, directiveId);
-    const task = ready.find((r) => r.id === taskId)!;
-
-    const result = await dispatchReadyTask(db, task, {});
-    // The default CC path returns a bridge_result (mock recognizes the marker
-    // or fails cleanly); either way no real subprocess is launched and the
-    // dispatch closes deterministically with the claude_agent route.
-    expect(result.bridge_result).toBeDefined();
-    const decided = db
-      .query("SELECT payload FROM events WHERE kind = 'dispatch_decided' AND task_id = ?")
-      .get(taskId) as { payload: string } | null;
-    expect(JSON.parse(decided!.payload).route).toBe("claude_agent");
-    const ccDispatched = db
-      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'cc_dispatched' AND task_id = ?")
+    // No peer job was enqueued for an ordinary design/research leaf.
+    const job = db
+      .query("SELECT COUNT(*) as c FROM events WHERE kind = 'claude_agent_job_requested' AND task_id = ?")
       .get(taskId) as { c: number };
-    // The hermetic mock emits cc_dispatched on entry.
-    expect(ccDispatched.c).toBeGreaterThanOrEqual(1);
+    expect(job.c).toBe(0);
   }, 10_000);
 });
 

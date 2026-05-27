@@ -53,24 +53,15 @@ export {
   opencodeQueryMock,
   opencodeQueryHighResidual,
   opencodeQueryAdversarialCycle2,
-  claudeCodeQueryMock,
-  FIXTURE_CC_IMPLEMENT_MARKER,
 } from "./mock";
 
 export { spawnRealOpencode } from "./opencode";
-export {
-  spawnRealClaudeCode,
-  claudeCodeQuery,
-  claudeEngineBridge,
-  materializeClaudeMcpConfig,
-  DEFAULT_CLAUDE_MODEL,
-} from "./claude";
-export type {
-  EngineBridge,
-  EngineBridgeKind,
-  EngineBridgeSpawn,
-  ClaudeSpawnOpts,
-} from "./types";
+// NOTE: the substrate does NOT spawn Claude Code programmatically. Claude
+// participates as a registered PEER that drains the claude_agent_job queue over
+// MCP (see runtime/claude_agent_job.ts + Architecture.md §"Participation is
+// symmetric"). The former programmatic-spawn bridge (runtime/bridge/claude.ts,
+// spawnRealClaudeCode/claudeCodeQuery) was removed — running `claude -p`
+// headlessly is forbidden.
 
 export {
   McpWarmPool,
