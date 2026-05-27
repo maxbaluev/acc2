@@ -1467,3 +1467,78 @@ describe("deliverable groundbase prompt section (Component B)", () => {
     expect(composed.sections.map((s) => s.name)).not.toContain("deliverable_groundbase");
   });
 });
+
+// ── P4 universalization — composer READS section posteriors (CWHVYFX9) ──
+//
+// closure_check: BEFORE discretionary section/budget selection the composer
+// folds the prompt_policy_section_selection posterior into a NON-floor
+// section's drop-priority. ADDITIVE — a high-scoring section is kept longer
+// (lower priorityP), a low-scoring one drops first (higher priorityP),
+// cold-start is a no-op so the existing priority ordering is preserved.
+describe("P4 prompt-policy section-selection posterior feedback (amendment CWHVYFX9)", () => {
+  const SECTION = "emission_grammars"; // non-floor (fallbackPriority=1)
+  const seedSectionPosterior = (
+    db: ReturnType<typeof openDb>,
+    sectionName: string,
+    goalShapeToken: string,
+    score: number,
+    confidence: number,
+  ): void => {
+    db.run(
+      `INSERT INTO scored_entity (entity_id, entity_kind, posterior_alpha, posterior_beta, score, confidence, updated_ts)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(entity_id) DO UPDATE SET
+         score = excluded.score, confidence = excluded.confidence, updated_ts = excluded.updated_ts`,
+      [
+        "prompt_policy_section_selection:" + sectionName + ":" + goalShapeToken,
+        "prompt_policy_section_selection",
+        1, 1, score, confidence, new Date().toISOString(),
+      ],
+    );
+  };
+
+  const priorityOf = async (db: ReturnType<typeof openDb>, taskId: string): Promise<number | undefined> => {
+    const composed = await composePrompt(db, { taskId });
+    return composed.sections.find((s) => s.name === SECTION)?.priorityP;
+  };
+
+  test("high-scoring section gets LOWER priorityP (kept longer) than cold-start; low-scoring gets HIGHER", async () => {
+    const shape = goalShape("Count files containing TODO substring");
+
+    const coldDb = openDb(":memory:");
+    const cold = openTask(coldDb);
+    const coldP = await priorityOf(coldDb, cold.taskId);
+    expect(coldP).toBeDefined();
+    closeDb();
+    _resetPromptCacheForTests();
+
+    const highDb = openDb(":memory:");
+    const high = openTask(highDb);
+    seedSectionPosterior(highDb, SECTION, shape, 1.0, 0.8); // strong positive
+    const highP = await priorityOf(highDb, high.taskId);
+    expect(highP).toBeDefined();
+    closeDb();
+    _resetPromptCacheForTests();
+
+    const lowDb = openDb(":memory:");
+    const low = openTask(lowDb);
+    seedSectionPosterior(lowDb, SECTION, shape, 0.0, 0.8); // strong negative
+    const lowP = await priorityOf(lowDb, low.taskId);
+    expect(lowP).toBeDefined();
+
+    // Composer READ the section posterior before selection: high-scoring kept
+    // longer (lower p), low-scoring drops first (higher p), cold-start between.
+    expect(highP!).toBeLessThan(coldP!);
+    expect(lowP!).toBeGreaterThan(coldP!);
+    closeDb();
+  });
+
+  test("cold-start (no posterior row) preserves the canonical section priority", async () => {
+    const db = openDb(":memory:");
+    const { taskId } = openTask(db);
+    const p = await priorityOf(db, taskId);
+    // emission_grammars is pushed at fallbackPriority=1 — no posterior → exactly 1.
+    expect(p).toBe(1);
+    closeDb();
+  });
+});

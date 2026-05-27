@@ -57,6 +57,13 @@ import {
   residualToBetaDeltas,
 } from "./artifact_store";
 import { goalShape } from "./goal_shape";
+// P4 universalization (amendment CWHVYFX9): score two DECISION-INFLUENCERS
+// by outcome using the SAME canonical primitive every other scored thing
+// uses. No meta-scorer, no parallel score table, no closed enum — entity_kind
+// is a free string admitted into the one scored_entity table. The recursion
+// collapses: the influencers that shape an act are credited by the same
+// residual that scores the act itself.
+import { applyScoredOutcome } from "./posterior";
 import { resolveArtifactId } from "../substrate/migration_runner";
 import { nowIso } from "./ids";
 import { attachedArchiveSchemas } from "../substrate/db";
@@ -1446,6 +1453,164 @@ export const distributeOwnerObservedOutcomeCredit = async (
   });
 };
 
+// ── P4 universalization — additive decision-influencer scoring ──────
+// (amendment CWHVYFX9)
+//
+// Two DECISION-INFLUENCERS are scored by outcome through the canonical
+// `applyScoredOutcome` primitive (runtime/posterior.ts) — the SAME band
+// algebra + half-life decay + scored_entity row + entity_score_updated
+// audit every other scored thing uses. There is NO meta-scorer, NO
+// parallel score table, and NO closed influencer enum: entity_kind is a
+// free string admitted into the one scored_entity table.
+//
+//   1. dispatch_route_axis_factor — the routing axes the dispatch_decider
+//      uses to pick a route/lane (one_shot_confidence, information_gap, …).
+//      The decider READS these posteriors before route selection so it
+//      learns which axes predict good routes.
+//   2. prompt_policy_section_selection — the prompt-policy section
+//      identities the prompt_composer selects (one per section_name). The
+//      composer READS these posteriors before discretionary section/budget
+//      selection so it learns which sections correlate with low-residual
+//      outcomes.
+//
+// Both are credited HERE, where outcome credit is already distributed, so
+// the influencer rides the existing residual signal — every action_scored
+// (universal projector) and task_closure_audited (dense pass) that lands
+// through this boundary credits the influencers that shaped the act.
+
+/** Stable scored_entity id for a routing-axis factor. The axis key is the
+ *  free-string identity; the entity_kind discriminates it from every other
+ *  scored thing. */
+export const dispatchRouteAxisFactorEntityId = (axisKey: string): string =>
+  "dispatch_route_axis_factor:" + axisKey;
+
+/** Stable scored_entity id for a prompt-policy section selection. The
+ *  section_name is the identity; goal_shape narrows it so the composer can
+ *  learn shape-specific section value. */
+export const promptPolicySectionSelectionEntityId = (sectionName: string, goalShapeToken: string): string =>
+  "prompt_policy_section_selection:" + sectionName + ":" + (goalShapeToken || "global");
+
+/** Read the most-recent dispatch_decided routing_axes for a task lineage so
+ *  the influencer scorer credits the axes that actually shaped this act's
+ *  route. Returns the latest non-empty routing_axes map (axis_key → value)
+ *  observed before `beforeTs`, or an empty map when none. */
+const latestRoutingAxesForTask = (
+  db: Database,
+  taskId: string,
+  beforeTs: string,
+): Record<string, number> => {
+  const row = firstEventRowAcrossTiers<{ payload: string; ts: string }>(
+    db,
+    "payload, ts",
+    "kind = 'dispatch_decided' AND task_id = ? AND ts <= ?",
+    [taskId, beforeTs],
+    "DESC",
+  );
+  if (!row) return {};
+  try {
+    const p = JSON.parse(row.payload || "{}") as Record<string, unknown>;
+    const axes = p.routing_axes;
+    if (!axes || typeof axes !== "object" || Array.isArray(axes)) return {};
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(axes as Record<string, unknown>)) {
+      if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+};
+
+/** Credit the two decision-influencers that shaped one scored act/closure.
+ *  ADDITIVE: rides the residual already being distributed for the outcome.
+ *  Each call upserts one scored_entity row per influencer identity via the
+ *  canonical applyScoredOutcome primitive (which emits entity_score_updated
+ *  and is idempotent on its own projection_key). Fail-soft: influencer
+ *  scoring must never poison the credit boundary. */
+const scoreDecisionInfluencers = (
+  db: Database,
+  params: {
+    scored_event_id: string;
+    task_id: string | null;
+    directive_id: string | null;
+    residual: number;
+    ts: string;
+    goal_shape: string;
+  },
+): void => {
+  if (!params.task_id) return;
+  const residual = clampResidual(params.residual);
+  // Distinct ts-per-influencer so applyScoredOutcome's idempotency
+  // projection_key (entity_score:{entity_id}:{ts}) collapses re-runs of the
+  // SAME scored event onto the SAME row without colliding across influencers.
+  const tsBase = params.scored_event_id; // stable per scored event
+  // 1. dispatch_route_axis_factor — every axis that shaped the route choice.
+  try {
+    const axes = latestRoutingAxesForTask(db, params.task_id, params.ts);
+    for (const axisKey of Object.keys(axes)) {
+      applyScoredOutcome(db, {
+        entity_id: dispatchRouteAxisFactorEntityId(axisKey),
+        entity_kind: "dispatch_route_axis_factor",
+        residual,
+        ts: params.ts,
+        directive_id: params.directive_id ?? undefined,
+        task_id: params.task_id ?? undefined,
+        context_refs: [params.scored_event_id],
+        payload: {
+          influencer: "dispatch_route_axis_factor",
+          axis_key: axisKey,
+          axis_value: axes[axisKey],
+          scored_event_id: params.scored_event_id,
+          projection_key: "influencer_score:dispatch_route_axis_factor:" + axisKey + ":" + tsBase,
+        },
+      });
+    }
+  } catch { /* fail-soft: influencer scoring never poisons credit */ }
+  // 2. prompt_policy_section_selection — every section identity selected on
+  //    this task lineage before the scored event landed.
+  try {
+    const selections = promptPolicySelectionRowsForLineage(
+      db,
+      params.task_id,
+      "?",
+      params.ts,
+    );
+    const seenSections = new Set<string>();
+    for (const sel of selections) {
+      let sectionName: string | null = null;
+      let selectionGoalShape = params.goal_shape;
+      try {
+        const p = JSON.parse(sel.payload) as Record<string, unknown>;
+        if (typeof p.section_name === "string" && p.section_name.length > 0) sectionName = p.section_name;
+        else if (typeof p.task_class === "string" && p.task_class.length > 0) sectionName = p.task_class;
+        if (typeof p.goal_shape === "string" && p.goal_shape.length > 0) selectionGoalShape = p.goal_shape;
+      } catch { /* skip malformed */ }
+      if (!sectionName) continue;
+      const entityId = promptPolicySectionSelectionEntityId(sectionName, selectionGoalShape);
+      if (seenSections.has(entityId)) continue;
+      seenSections.add(entityId);
+      applyScoredOutcome(db, {
+        entity_id: entityId,
+        entity_kind: "prompt_policy_section_selection",
+        residual,
+        ts: params.ts,
+        directive_id: params.directive_id ?? undefined,
+        task_id: params.task_id ?? undefined,
+        context_refs: [params.scored_event_id],
+        payload: {
+          influencer: "prompt_policy_section_selection",
+          section_name: sectionName,
+          goal_shape: selectionGoalShape,
+          scored_event_id: params.scored_event_id,
+          projection_key: "influencer_score:prompt_policy_section_selection:" + entityId + ":" + tsBase,
+        },
+      });
+    }
+  } catch { /* fail-soft */ }
+};
+
+export const __scoreDecisionInfluencersForTest = scoreDecisionInfluencers;
+
 // ── T0.2 Universal action_scored → act_artifact_score_updated projection ─
 //
 // Live evidence (24h pre-fix): action_scored=2380,
@@ -1927,6 +2092,23 @@ export const projectActionScoredToCredit = (
           projection_key: metaProjectionKey,
           projected_from: "action_scored_universal_projector",
         } as JsonValue,
+      });
+    }
+
+    // P4 universalization (amendment CWHVYFX9): credit the two
+    // decision-influencers that shaped this act by the SAME observed
+    // residual. Skip when the residual is withheld until closure — an
+    // apply record is not an outcome observation, so the influencer
+    // posterior must not move on a placeholder. The real closure pass
+    // re-enters this projector with the dense residual and credits then.
+    if (!residualWithheld) {
+      scoreDecisionInfluencers(db, {
+        scored_event_id: scoredEvent.id,
+        task_id: scoredEvent.task_id,
+        directive_id: scoredEvent.directive_id,
+        residual,
+        ts,
+        goal_shape: universalGoalShape,
       });
     }
   } catch (err) {

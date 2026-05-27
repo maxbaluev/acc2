@@ -797,3 +797,67 @@ describe("dispatch_decider executor-selection (increment 2/2 CC bridge)", () => 
     expect(decision.verifier_evidence.executor_selection_weight).toBeGreaterThan(0);
   });
 });
+
+// ── P4 universalization — decider READS route-axis posteriors (CWHVYFX9) ──
+//
+// closure_check: BEFORE route selection the decider folds the
+// dispatch_route_axis_factor posteriors into the axis contribution. ADDITIVE
+// — a well-evidenced axis posterior nudges the axis value; cold-start is a
+// no-op so the existing routing logic is preserved verbatim.
+describe("P4 route-axis-factor posterior feedback (amendment CWHVYFX9)", () => {
+  // Seed a scored_entity row directly so the test controls the posterior
+  // (entity_kind=dispatch_route_axis_factor is the same row credit.ts writes).
+  const seedAxisPosterior = (
+    db: ReturnType<typeof openDb>,
+    axisKey: string,
+    alpha: number,
+    beta: number,
+    score: number,
+    confidence: number,
+  ): void => {
+    db.run(
+      `INSERT INTO scored_entity (entity_id, entity_kind, posterior_alpha, posterior_beta, score, confidence, updated_ts)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(entity_id) DO UPDATE SET
+         posterior_alpha = excluded.posterior_alpha,
+         posterior_beta = excluded.posterior_beta,
+         score = excluded.score,
+         confidence = excluded.confidence,
+         updated_ts = excluded.updated_ts`,
+      ["dispatch_route_axis_factor:" + axisKey, "dispatch_route_axis_factor", alpha, beta, score, confidence, new Date().toISOString()],
+    );
+  };
+
+  test("high-confidence axis posterior nudges the axis value and surfaces evidence keys", () => {
+    const db = openDb(":memory:");
+    const task = sampleTask({ goal: "fix doc typo", target_resources: ["repo:docs/README.md"] } as Partial<TaskNode>);
+    // Baseline (no posterior) one_shot_confidence value.
+    const baseline = decideDispatch(db, task).routing_axes.one_shot_confidence;
+    closeDb();
+
+    const db2 = openDb(":memory:");
+    // Strong posterior pulling one_shot_confidence DOWN to 0.0 at high confidence.
+    seedAxisPosterior(db2, "one_shot_confidence", 1, 9, 0.0, 0.9);
+    const decision = decideDispatch(db2, task);
+    // The axis was nudged toward the posterior score (0.0) at confidence 0.9.
+    expect(decision.routing_axes.one_shot_confidence).toBeLessThan(baseline);
+    // Evidence is surfaced so the read is observable + auditable.
+    expect(decision.verifier_evidence.route_axis_factor_posterior_applied).toBe(1);
+    expect(decision.verifier_evidence.route_axis_factor_one_shot_confidence_posterior_confidence).toBeCloseTo(0.9, 6);
+    closeDb();
+  });
+
+  test("cold-start (no posterior row) leaves routing axes unchanged", () => {
+    const db = openDb(":memory:");
+    const task = sampleTask({ goal: "fix doc typo", target_resources: ["repo:docs/README.md"] } as Partial<TaskNode>);
+    const baseline = decideDispatch(db, task).routing_axes.one_shot_confidence;
+    closeDb();
+
+    const db2 = openDb(":memory:");
+    const decision = decideDispatch(db2, task);
+    expect(decision.routing_axes.one_shot_confidence).toBeCloseTo(baseline, 6);
+    // No posterior applied → applied flag is 0.
+    expect(decision.verifier_evidence.route_axis_factor_posterior_applied).toBe(0);
+    closeDb();
+  });
+});

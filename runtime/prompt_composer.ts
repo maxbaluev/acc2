@@ -36,6 +36,11 @@ import {
 } from "./prompt_cache";
 import { categorizeGoalShapeSemantic } from "./decomposition_strategy_extractor";
 import { buildBrainSelfAudit, renderBrainSelfAuditSection } from "./brain_introspection";
+// P4 universalization (amendment CWHVYFX9): read the
+// prompt_policy_section_selection posteriors (scored by credit.ts via the
+// canonical applyScoredOutcome primitive) so the composer learns which
+// sections correlate with low-residual outcomes. Read-only here.
+import { getScoredEntity } from "./posterior";
 import type { JsonValue, OwnerProfile } from "../substrate/types";
 import { OWNER_PROFILE_DEFAULTS } from "../substrate/types";
 
@@ -166,6 +171,41 @@ const initTokenizer = (): Tiktoken | null => {
     _tiktokenEncoder = null;
   }
   return _tiktokenEncoder;
+};
+
+// P4 universalization (amendment CWHVYFX9): the SAME entity-id convention
+// credit.ts scores under, kept local so the read path stays a pure string
+// compose + getScoredEntity lookup (no cross-module helper import).
+const promptPolicySectionSelectionEntityId = (sectionName: string, goalShapeToken: string): string =>
+  "prompt_policy_section_selection:" + sectionName + ":" + (goalShapeToken || "global");
+
+/** ADDITIVE: nudge a NON-floor section's drop-priority by its
+ *  prompt_policy_section_selection posterior so the composer keeps
+ *  low-residual-correlated sections longer under budget pressure and drops
+ *  weak ones first. The Beta posterior score ∈ [0,1] (higher = the section
+ *  correlated with better outcomes) is centered on 0.5 and scaled by
+ *  confidence, then mapped to a small priority delta (≤ ±0.5). A high-scoring
+ *  section gets a slightly LOWER p (sorted-first, kept longer); a weak one a
+ *  slightly HIGHER p (dropped first). Floor sections never move (they cannot
+ *  be dropped). Cold-start (no row / confidence 0) is a no-op so the existing
+ *  priority ordering is preserved verbatim until evidence accrues. */
+const sectionSelectionPriorityDelta = (
+  db: Database,
+  sectionName: string,
+  goalShapeToken: string,
+  floor: boolean,
+): number => {
+  if (floor) return 0;
+  let entity: ReturnType<typeof getScoredEntity> = null;
+  try {
+    entity = getScoredEntity(db, promptPolicySectionSelectionEntityId(sectionName, goalShapeToken));
+  } catch { entity = null; }
+  if (!entity) return 0;
+  const confidence = Math.max(0, Math.min(1, entity.confidence));
+  if (confidence <= 0) return 0;
+  const score = Math.max(0, Math.min(1, entity.score));
+  // score 1 → delta -0.5 (keep longer); score 0 → delta +0.5 (drop first).
+  return (0.5 - score) * confidence;
 };
 
 /** Real token count via js-tiktoken's cl100k_base (matches the
@@ -2319,7 +2359,14 @@ export const composePrompt = async (db: Database, opts: PromptComposeOptions): P
       fallbackReason = "no_policy_bundle_no_retrieved_artifact_no_variant";
     }
 
-    candidates.push({ name, p: chosenPriority, floor: chosenFloor, body: chosenBody });
+    // P4 universalization (amendment CWHVYFX9): READ the
+    // prompt_policy_section_selection posterior and let it weight which
+    // sections survive budget pressure. ADDITIVE — the delta is applied on
+    // top of the chosen priority; floor sections and cold-start identities
+    // are untouched (delta = 0), so the existing ordering is preserved until
+    // outcome evidence accrues for this section/goal_shape identity.
+    const sectionPriorityDelta = sectionSelectionPriorityDelta(db, name, composerGoalShape, chosenFloor);
+    candidates.push({ name, p: chosenPriority + sectionPriorityDelta, floor: chosenFloor, body: chosenBody });
 
     // Audit emission: one prompt_policy_section_selected per pushPolicy
     // call so T4.2 meta-credit can associate action outcomes with the

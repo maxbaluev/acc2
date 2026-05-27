@@ -6490,6 +6490,72 @@ export type LowRiskInlinePatternRow = {
   confidence: number;
 };
 
+// ── P4 universalization — decision-influencer scores (amendment CWHVYFX9) ──
+//
+// Observability projection for the two decision-influencers scored by
+// credit.ts through the canonical applyScoredOutcome primitive:
+// dispatch_route_axis_factor and prompt_policy_section_selection. These are
+// ordinary scored_entity rows (free-string entity_kind), so this view is a
+// thin projection over the one scored_entity table — NOT a parallel score
+// table. Additive: reads the existing table, breaks no existing view.
+
+export type DecisionInfluencerScoreRow = {
+  entity_id: string;
+  entity_kind: string;
+  posterior_alpha: number;
+  posterior_beta: number;
+  score: number;
+  confidence: number;
+  updated_ts: string;
+};
+
+/** The two influencer entity_kinds scored under P4. Open vocabulary — this
+ *  is a read FILTER for observability, not a closed enum the scorer is bound
+ *  by (credit.ts admits the rows via a free entity_kind string). */
+export const DECISION_INFLUENCER_KINDS = [
+  "dispatch_route_axis_factor",
+  "prompt_policy_section_selection",
+] as const;
+
+/** Project the scored decision-influencer rows for observability. Filters
+ *  the scored_entity table to the P4 influencer kinds, ordered by kind then
+ *  score DESC (uses idx_scored_entity_score). Fail-soft: a fresh schema
+ *  without the scored_entity table returns []. */
+export const decisionInfluencerScores = (
+  db: Database,
+  opts?: { entity_kind?: string; limit?: number },
+): DecisionInfluencerScoreRow[] => {
+  const kinds: string[] = opts?.entity_kind
+    ? [opts.entity_kind]
+    : [...DECISION_INFLUENCER_KINDS];
+  const placeholders = kinds.map(() => "?").join(", ");
+  const limitSql = typeof opts?.limit === "number" && opts.limit > 0
+    ? ` LIMIT ${Math.min(Math.floor(opts.limit), 1000)}`
+    : "";
+  let rows: Array<Record<string, unknown>> = [];
+  try {
+    rows = db
+      .query(
+        `SELECT entity_id, entity_kind, posterior_alpha, posterior_beta, score, confidence, updated_ts
+           FROM scored_entity
+          WHERE entity_kind IN (${placeholders})
+          ORDER BY entity_kind ASC, score DESC${limitSql}`,
+      )
+      .all(...kinds) as Array<Record<string, unknown>>;
+  } catch {
+    return [];
+  }
+  return rows.map((r) => ({
+    entity_id: r.entity_id as string,
+    entity_kind: r.entity_kind as string,
+    posterior_alpha: (r.posterior_alpha as number) ?? 1,
+    posterior_beta: (r.posterior_beta as number) ?? 1,
+    score: (r.score as number) ?? 0.5,
+    confidence: (r.confidence as number) ?? 0,
+    updated_ts: r.updated_ts as string,
+  }));
+};
+
 /** Promoted knowledge entries tagged `low_risk_inline_pattern` with
  *  score ≥ 0.7 AND confidence ≥ 0.6. The dispatch decider reads this view
  *  to decide whether a directive can take the Claude inline lane. Fail-

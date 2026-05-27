@@ -20,7 +20,11 @@ import {
   __residualToBetaDeltasForTest,
   __brainAccuracyArtifactIdForTest,
   __classifyTargetForTest,
+  dispatchRouteAxisFactorEntityId,
+  promptPolicySectionSelectionEntityId,
 } from "./credit";
+import { getScoredEntity } from "./posterior";
+import { decisionInfluencerScores } from "../substrate/views";
 import { getEventById } from "./events";
 import { Database as Sqlite } from "bun:sqlite";
 import type { Database } from "bun:sqlite";
@@ -2723,6 +2727,215 @@ describe("credit by-id reads span the hot/cold tier (amendment GZHBMX4R, guarant
     );
 
     expect(cited).toEqual([{ id: source.id, weightFactor: 1.0 }]);
+    closeDb();
+  });
+});
+
+// ── P4 universalization — decision-influencer scoring (amendment CWHVYFX9) ──
+//
+// closure_checks: on action_scored the universal credit boundary scores the
+// two influencers that shaped the act — dispatch_route_axis_factor (from the
+// task's dispatch_decided routing_axes) and prompt_policy_section_selection
+// (from the task lineage's prompt_policy_section_selected rows) — via the
+// SAME applyScoredOutcome primitive, crediting them by the SAME residual.
+// Each lands as a scored_entity row + an entity_score_updated event. The
+// existing meta_credit / act_artifact credit path stays intact.
+describe("P4 decision-influencer scoring (amendment CWHVYFX9)", () => {
+  const seedScoredActWithInfluencers = (
+    db: Database,
+    residual: number,
+  ): { scoredId: string; directiveId: string; taskId: string } => {
+    const directiveId = "d_p4_inf";
+    const taskId = "t_p4_inf";
+    insertSampleArtifact(db, "art_action_p4", "// action");
+    insertSampleArtifact(db, "art_verifier_p4", "// verifier");
+    insertSampleArtifact(db, "art_policy_bundle_p4", "// policy bundle");
+    // dispatch_decided carries the routing_axes that shaped the route.
+    emitEvent(db, {
+      kind: "dispatch_decided",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: {
+        route: "opencode_brain",
+        routing_axes: { one_shot_confidence: 0.7, decomposition_value: 0.4 },
+      },
+    });
+    // prompt_policy_section_selected on the same task: the section identity.
+    emitEvent(db, {
+      kind: "prompt_policy_section_selected",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: {
+        section_name: "workflow",
+        source: "policy_bundle",
+        artifact_id: "art_policy_bundle_p4",
+        goal_shape: "shape_p4",
+      },
+    });
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: taskId,
+      action_artifact_id: "art_action_p4",
+      verifier_artifact_id: "art_verifier_p4",
+      predicted_residual: residual,
+      payload: {},
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      action_artifact_id: "art_action_p4",
+      verifier_artifact_id: "art_verifier_p4",
+      residual,
+      payload: { action_predicted_event_id: ap.id, residual },
+    });
+    const scoredRow = db
+      .query<{ payload: string; context_refs: string; residual: number | null; action_artifact_id: string | null; verifier_artifact_id: string | null }, [string]>(
+        "SELECT payload, context_refs, residual, action_artifact_id, verifier_artifact_id FROM events WHERE id = ?",
+      )
+      .get(scored.id)!;
+    projectActionScoredToCredit(db, {
+      id: scored.id,
+      payload: scoredRow.payload,
+      context_refs: scoredRow.context_refs,
+      directive_id: directiveId,
+      task_id: taskId,
+      residual: scoredRow.residual,
+      action_artifact_id: scoredRow.action_artifact_id,
+      verifier_artifact_id: scoredRow.verifier_artifact_id,
+    });
+    return { scoredId: scored.id, directiveId, taskId };
+  };
+
+  test("scored_entity rows created for both influencers on action_scored (success residual → alpha moves)", () => {
+    const db = openDb(":memory:");
+    seedScoredActWithInfluencers(db, 0); // perfect outcome
+
+    const axisOne = getScoredEntity(db, dispatchRouteAxisFactorEntityId("one_shot_confidence"));
+    const axisDecomp = getScoredEntity(db, dispatchRouteAxisFactorEntityId("decomposition_value"));
+    expect(axisOne).not.toBeNull();
+    expect(axisDecomp).not.toBeNull();
+    expect(axisOne!.entity_kind).toBe("dispatch_route_axis_factor");
+    // Perfect residual (0) is a success → alpha lifts above the (1,1) prior.
+    expect(axisOne!.posterior_alpha).toBeGreaterThan(1);
+
+    const section = getScoredEntity(db, promptPolicySectionSelectionEntityId("workflow", "shape_p4"));
+    expect(section).not.toBeNull();
+    expect(section!.entity_kind).toBe("prompt_policy_section_selection");
+    expect(section!.posterior_alpha).toBeGreaterThan(1);
+
+    closeDb();
+  });
+
+  test("each influencer emits an entity_score_updated event (the primitive's audit row)", () => {
+    const db = openDb(":memory:");
+    seedScoredActWithInfluencers(db, 0);
+    const rows = db
+      .query<{ payload: string }, []>(
+        "SELECT payload FROM events WHERE kind = 'entity_score_updated'",
+      )
+      .all();
+    const kinds = rows.map((r) => JSON.parse(r.payload).entity_kind as string);
+    expect(kinds).toContain("dispatch_route_axis_factor");
+    expect(kinds).toContain("prompt_policy_section_selection");
+    closeDb();
+  });
+
+  test("failure residual moves the influencer posterior toward beta (credited by the SAME residual)", () => {
+    const db = openDb(":memory:");
+    seedScoredActWithInfluencers(db, 1); // total miss
+    const axis = getScoredEntity(db, dispatchRouteAxisFactorEntityId("one_shot_confidence"));
+    expect(axis).not.toBeNull();
+    expect(axis!.posterior_beta).toBeGreaterThan(1);
+    expect(axis!.posterior_alpha).toBeLessThanOrEqual(1.0001);
+    closeDb();
+  });
+
+  test("withheld residual does NOT move influencer posteriors (no fabricated credit)", () => {
+    const db = openDb(":memory:");
+    const directiveId = "d_p4_wh";
+    const taskId = "t_p4_wh";
+    insertSampleArtifact(db, "art_action_wh", "// action");
+    insertSampleArtifact(db, "art_verifier_wh", "// verifier");
+    emitEvent(db, {
+      kind: "dispatch_decided",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { route: "opencode_brain", routing_axes: { one_shot_confidence: 0.5 } },
+    });
+    const ap = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: taskId,
+      action_artifact_id: "art_action_wh",
+      verifier_artifact_id: "art_verifier_wh",
+      predicted_residual: 0.2,
+      payload: { residual_withheld: true },
+    });
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      action_artifact_id: "art_action_wh",
+      verifier_artifact_id: "art_verifier_wh",
+      payload: { action_predicted_event_id: ap.id, residual_withheld: true },
+    });
+    const scoredRow = db
+      .query<{ payload: string; context_refs: string; residual: number | null; action_artifact_id: string | null; verifier_artifact_id: string | null }, [string]>(
+        "SELECT payload, context_refs, residual, action_artifact_id, verifier_artifact_id FROM events WHERE id = ?",
+      )
+      .get(scored.id)!;
+    projectActionScoredToCredit(db, {
+      id: scored.id,
+      payload: scoredRow.payload,
+      context_refs: scoredRow.context_refs,
+      directive_id: directiveId,
+      task_id: taskId,
+      residual: scoredRow.residual,
+      action_artifact_id: scoredRow.action_artifact_id,
+      verifier_artifact_id: scoredRow.verifier_artifact_id,
+    });
+    // No influencer scored_entity row should have been created.
+    expect(getScoredEntity(db, dispatchRouteAxisFactorEntityId("one_shot_confidence"))).toBeNull();
+    closeDb();
+  });
+
+  test("existing meta_credit + act_artifact credit path stays INTACT alongside influencer scoring", () => {
+    const db = openDb(":memory:");
+    seedScoredActWithInfluencers(db, 0);
+    // The composer bundle still accrues posterior via the meta-credit path.
+    const meta = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'meta_credit_projected'")
+      .get() as { c: number };
+    expect(meta.c).toBeGreaterThanOrEqual(1);
+    expect(getArtifact(db, "art_policy_bundle_p4")!.posteriorAlpha).toBeGreaterThan(1);
+    // And the primary action artifact still received its credit row.
+    const primary = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'act_artifact_score_updated' AND json_extract(payload, '$.artifact_id') = 'art_action_p4'")
+      .get() as { c: number };
+    expect(primary.c).toBeGreaterThanOrEqual(1);
+    closeDb();
+  });
+
+  test("decisionInfluencerScores view projects both influencer kinds (observable)", () => {
+    const db = openDb(":memory:");
+    seedScoredActWithInfluencers(db, 0);
+    const all = decisionInfluencerScores(db);
+    const kinds = new Set(all.map((r) => r.entity_kind));
+    expect(kinds.has("dispatch_route_axis_factor")).toBe(true);
+    expect(kinds.has("prompt_policy_section_selection")).toBe(true);
+    // Kind-filtered read narrows to one influencer.
+    const onlyAxis = decisionInfluencerScores(db, { entity_kind: "dispatch_route_axis_factor" });
+    expect(onlyAxis.every((r) => r.entity_kind === "dispatch_route_axis_factor")).toBe(true);
+    expect(onlyAxis.length).toBeGreaterThanOrEqual(1);
     closeDb();
   });
 });

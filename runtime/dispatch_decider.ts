@@ -30,7 +30,7 @@ import { blockersOf } from "./interference";
 import { findRecipeMatch as findRealRecipeMatch } from "./recipe_replay";
 import { lowRiskInlinePatterns } from "../substrate/views";
 import { parseResourceRefs, resourceMatchesPattern, type ResourceRef } from "./resource_uri";
-import { betaMean as canonicalBetaMean, betaEvidenceConfidence } from "./posterior";
+import { betaMean as canonicalBetaMean, betaEvidenceConfidence, getScoredEntity } from "./posterior";
 import { goalShape as computeGoalShape } from "./goal_shape";
 import { buildRankingContext, rankStrategies, applyStrategyRouteDeltas, selectDecisionPolicyArtifacts, type RankedStrategy } from "./dispatch_strategy_ranker";
 
@@ -274,6 +274,48 @@ const blendLearnedAxis = (learned: Record<string, number>, axis: string, fallbac
   const v = learned[axis];
   if (typeof v === "number" && Number.isFinite(v)) return clamp01(v * 0.65 + fallback * 0.35);
   return clamp01(fallback);
+};
+
+// P4 universalization (amendment CWHVYFX9): the SAME entity-id convention
+// credit.ts scores under. Kept local (no cross-module import of the helper)
+// so the read path stays a pure string compose + getScoredEntity lookup.
+const dispatchRouteAxisFactorEntityId = (axisKey: string): string =>
+  "dispatch_route_axis_factor:" + axisKey;
+
+/** ADDITIVE: fold the `dispatch_route_axis_factor` posterior into each axis
+ *  BEFORE route selection so the decider learns which axes predict good
+ *  routes. The scored_entity row for an axis carries a Beta posterior whose
+ *  score ∈ [0,1] (higher = the axis correlated with low-residual outcomes)
+ *  and confidence ∈ [0,1] (rises with evidence). We blend the axis value
+ *  toward its posterior score, gated by confidence, so a cold-start axis
+ *  (confidence ~0) is left untouched and a well-evidenced axis is nudged
+ *  toward its learned value. This does NOT replace the existing
+ *  blendLearnedAxis fallback/learned-evidence math — it rides on top of it.
+ *  Returns the (possibly-nudged) axes map plus per-axis evidence. */
+const applyRouteAxisFactorPosteriors = (
+  db: Database,
+  axes: Record<string, number>,
+): { axes: Record<string, number>; evidence: Record<string, number> } => {
+  const out: Record<string, number> = { ...axes };
+  const evidence: Record<string, number> = {};
+  let applied = 0;
+  for (const axisKey of Object.keys(out)) {
+    let entity: ReturnType<typeof getScoredEntity> = null;
+    try {
+      entity = getScoredEntity(db, dispatchRouteAxisFactorEntityId(axisKey));
+    } catch { entity = null; }
+    if (!entity) continue;
+    const confidence = clamp01(entity.confidence);
+    const posteriorScore = clamp01(entity.score);
+    if (confidence <= 0) continue;
+    const base = clamp01(out[axisKey] ?? 0);
+    out[axisKey] = clamp01(base * (1 - confidence) + posteriorScore * confidence);
+    evidence[`route_axis_factor_${axisKey}_posterior_score`] = posteriorScore;
+    evidence[`route_axis_factor_${axisKey}_posterior_confidence`] = confidence;
+    applied = 1;
+  }
+  evidence.route_axis_factor_posterior_applied = applied;
+  return { axes: out, evidence };
 };
 
 const scoreRoutesFromAxes = (axes: Record<string, number>): DispatchRouteScores => {
@@ -652,12 +694,19 @@ const buildDispatchDecisionEvidence = (db: Database, task: TaskNode): DispatchDe
   };
   const routing_axes: Record<string, number> = {};
   for (const axis of DISPATCH_ROUTE_AXIS_KEYS) routing_axes[axis] = blendLearnedAxis(learned.axes, axis, fallbackAxes[axis] ?? 0);
+  // P4 universalization (amendment CWHVYFX9): READ the dispatch_route_axis_factor
+  // posteriors and let them weight the axis contribution BEFORE route_scores
+  // are computed. ADDITIVE — folds the learned posterior in on top of the
+  // existing fallback/learned-evidence blend; route_scores then derive from
+  // the nudged axes so the influencer feeds back into the decision it shapes.
+  const axisFactor = applyRouteAxisFactorPosteriors(db, routing_axes);
   return {
-    routing_axes,
-    route_scores: scoreRoutesFromAxes(routing_axes),
+    routing_axes: axisFactor.axes,
+    route_scores: scoreRoutesFromAxes(axisFactor.axes),
     runtime_selection: buildRuntimeSelectionEvidence(db, task, text, targets),
     verifier_evidence: {
       ...learned.verifier_evidence,
+      ...axisFactor.evidence,
       target_count: targets.length,
       semantic_independent_deliverable_count: semantic.independent_deliverable_count,
       semantic_gate_count: semantic.gate_count,
