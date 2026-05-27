@@ -6,8 +6,12 @@ import {
   compactDerivedEvents,
   compactionWorkerTick,
   COMPACTABLE_DERIVED_EVENT_KINDS,
+  COMPACTION_DERIVED_MIN_RETENTION_MS,
   COMPACTION_DERIVED_RETENTION_MS,
   COMPACTION_FRAME_RETENTION_MS,
+  COMPACTION_HIGHRATE_RETENTION_MS,
+  HIGH_RATE_TELEMETRY_KINDS,
+  retentionForKind,
 } from "./compaction";
 
 afterAll(() => closeDb());
@@ -133,20 +137,27 @@ describe("compaction.compactDerivedEvents", () => {
     expect(left.c).toBe(0);
   });
 
-  test("keeps derived telemetry rows newer than the retention window", () => {
+  test("keeps NON-high-rate derived telemetry rows newer than the 7d window", () => {
     const db = openDb(":memory:");
     const now = Date.now();
     const taskId = newId();
     const directiveId = newId();
-    for (const kind of COMPACTABLE_DERIVED_EVENT_KINDS) {
+    // Only non-high-rate derived kinds follow the 7d/1d window. High-rate
+    // kinds now follow the short 1h tier and would be pruned at this age, so
+    // they are excluded here (their behavior is covered in compaction.highRateTier).
+    const nonHighRate = COMPACTABLE_DERIVED_EVENT_KINDS.filter(
+      (k) => !HIGH_RATE_TELEMETRY_KINDS.includes(k),
+    );
+    expect(nonHighRate.length).toBeGreaterThan(0);
+    for (const kind of nonHighRate) {
       insertEvent(db, kind, youngDerivedTs(now), taskId, directiveId);
     }
     const pruned = compactDerivedEvents(db, { nowMs: now });
     expect(pruned).toBe(0);
     const left = db
-      .query(`SELECT COUNT(*) AS c FROM events WHERE kind IN (${COMPACTABLE_DERIVED_EVENT_KINDS.map(() => "?").join(",")})`)
-      .get(...COMPACTABLE_DERIVED_EVENT_KINDS) as { c: number };
-    expect(left.c).toBe(COMPACTABLE_DERIVED_EVENT_KINDS.length);
+      .query(`SELECT COUNT(*) AS c FROM events WHERE kind IN (${nonHighRate.map(() => "?").join(",")})`)
+      .get(...nonHighRate) as { c: number };
+    expect(left.c).toBe(nonHighRate.length);
   });
 
   test("never prunes non-listed kinds even when aged", () => {
@@ -224,6 +235,127 @@ describe("compaction.compactDerivedEvents", () => {
     expect(pruned).toBe(3);
     const left = db.query("SELECT COUNT(*) AS c FROM events WHERE kind = 'worker_tick_completed'").get() as { c: number };
     expect(left.c).toBe(7);
+  });
+});
+
+describe("compaction.highRateTier", () => {
+  // A ts older than the 1h high-rate window but YOUNGER than the 1d derived
+  // floor — proves the high-rate tier prunes on its own shorter cutoff and
+  // does not wait for the derived MIN.
+  const betweenHighRateAndDerivedMinTs = (now: number) =>
+    new Date(now - (COMPACTION_HIGHRATE_RETENTION_MS + 60_000)).toISOString();
+  // A ts younger than the 1d derived MIN floor (and thus younger than the 7d
+  // default) — non-high-rate derived kinds must survive at this age.
+  const youngerThanDerivedMinTs = (now: number) =>
+    new Date(now - (COMPACTION_DERIVED_MIN_RETENTION_MS - 60 * 60 * 1000)).toISOString();
+
+  test("default high-rate retention is 1h", () => {
+    expect(COMPACTION_HIGHRATE_RETENTION_MS).toBe(60 * 60 * 1000);
+  });
+
+  test("retentionForKind: high-rate kinds resolve to the short window, others to the derived window", () => {
+    for (const k of HIGH_RATE_TELEMETRY_KINDS) {
+      expect(retentionForKind(k)).toBe(COMPACTION_HIGHRATE_RETENTION_MS);
+    }
+    // brain_reasoning_recorded is compactable but NOT high-rate.
+    expect(retentionForKind("brain_reasoning_recorded")).toBe(COMPACTION_DERIVED_RETENTION_MS);
+    // A kind in neither set still resolves to the derived window (caller's
+    // pressure-compressed value when supplied).
+    expect(retentionForKind("anything", { derivedRetentionMs: 123 })).toBe(123);
+  });
+
+  test("prunes high-rate kinds older than 1h even when younger than the 1d derived MIN", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const taskId = newId();
+    const directiveId = newId();
+    // Age between the 1h high-rate window and the 1d derived floor.
+    const ts = betweenHighRateAndDerivedMinTs(now);
+    // Sanity: this ts is younger than the derived MIN, so the OLD single-tier
+    // behavior (cutoff at the 1d floor) would NOT have pruned these.
+    expect(now - new Date(ts).getTime()).toBeLessThan(COMPACTION_DERIVED_MIN_RETENTION_MS);
+
+    // Insert every high-rate kind EXCEPT bridge_frame_received (which the
+    // derived pass deliberately leaves to compactBridgeFrames).
+    const highRateNonFrame = HIGH_RATE_TELEMETRY_KINDS.filter((k) => k !== "bridge_frame_received");
+    for (const kind of highRateNonFrame) {
+      insertEvent(db, kind, ts, taskId, directiveId);
+    }
+    // A non-high-rate derived kind at the SAME (young) age must survive the
+    // derived 1d/7d window.
+    insertEvent(db, "brain_reasoning_recorded", ts, taskId, directiveId);
+    // Credit/knowledge spine kind must NEVER be pruned regardless of age.
+    insertEvent(db, "candidate_confirmed", ts, taskId, directiveId);
+
+    // Run with the pressure-compressed derived window at its 1d floor — the
+    // most aggressive derived window — to prove the high-rate tier prunes
+    // EARLIER than even the floor.
+    const pruned = compactDerivedEvents(db, {
+      nowMs: now,
+      retentionMs: COMPACTION_DERIVED_MIN_RETENTION_MS,
+    });
+    expect(pruned).toBe(highRateNonFrame.length);
+
+    // All high-rate non-frame kinds gone.
+    const hrLeft = db
+      .query(`SELECT COUNT(*) AS c FROM events WHERE kind IN (${highRateNonFrame.map(() => "?").join(",")})`)
+      .get(...highRateNonFrame) as { c: number };
+    expect(hrLeft.c).toBe(0);
+    // Non-high-rate derived kind survives (younger than the 1d derived window).
+    const derivedLeft = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'brain_reasoning_recorded'")
+      .get() as { c: number };
+    expect(derivedLeft.c).toBe(1);
+    // Credit spine survives.
+    const spineLeft = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'candidate_confirmed'")
+      .get() as { c: number };
+    expect(spineLeft.c).toBe(1);
+  });
+
+  test("keeps non-high-rate derived kinds on the 7d/1d window (not the 1h tier)", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const taskId = newId();
+    const directiveId = newId();
+    // Old enough for the 1h high-rate tier but younger than the 7d derived
+    // window — a non-high-rate derived kind must SURVIVE.
+    const ts = youngerThanDerivedMinTs(now);
+    insertEvent(db, "brain_reasoning_recorded", ts, taskId, directiveId);
+    insertEvent(db, "sql_worker_pool_metrics", ts, taskId, directiveId);
+    const pruned = compactDerivedEvents(db, { nowMs: now });
+    expect(pruned).toBe(0);
+    const left = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind IN ('brain_reasoning_recorded','sql_worker_pool_metrics')")
+      .get() as { c: number };
+    expect(left.c).toBe(2);
+  });
+
+  test("derived pass never deletes bridge_frame_received (no double-delete with compactBridgeFrames)", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const taskId = newId();
+    const directiveId = newId();
+    // A very old, closed frame — eligible for compactBridgeFrames AND older
+    // than the 1h high-rate window. The DERIVED pass must still leave it alone
+    // (only compactBridgeFrames owns frame deletion), so the two passes never
+    // contend for the same row.
+    const frameTs = new Date(now - (COMPACTION_FRAME_RETENTION_MS + 60_000)).toISOString();
+    insertEvent(db, "bridge_frame_received", frameTs, taskId, directiveId);
+    insertEvent(db, "brain_dispatch_closed", frameTs, taskId, directiveId);
+
+    const prunedDerived = compactDerivedEvents(db, { nowMs: now });
+    expect(prunedDerived).toBe(0); // derived pass did NOT touch the frame
+    const stillThere = db
+      .query("SELECT COUNT(*) AS c FROM events WHERE kind = 'bridge_frame_received'")
+      .get() as { c: number };
+    expect(stillThere.c).toBe(1);
+
+    // The frame path prunes it; a follow-up derived pass is still a no-op
+    // (idempotent, no error).
+    const frameReport = compactBridgeFrames(db, { nowMs: now });
+    expect(frameReport.pruned_frames).toBe(1);
+    expect(compactDerivedEvents(db, { nowMs: now })).toBe(0);
   });
 });
 

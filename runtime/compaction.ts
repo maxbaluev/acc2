@@ -103,6 +103,45 @@ export const COMPACTABLE_DERIVED_EVENT_KINDS: readonly string[] = [
   "constitutional_gate_decision",
 ];
 
+/** HIGH-RATE pure-telemetry kinds. Convergence fix (2026-05-26): these kinds
+ *  are emitted per-operation at very high volume (measured: constitutional_gate
+ *  _decision ~116/min — one per dispatch admission — accumulating ~167k rows
+ *  before the derived MIN (1d) pruned them). They are observation-only with
+ *  ZERO full-history readers (constitutional_gate_decision's only readers are
+ *  recency-bounded ORDER BY ts DESC LIMIT 10/100; the rest have no DB reader),
+ *  so a much shorter retention is safe. They get a dedicated 1h tier instead of
+ *  the 7d/1d derived window so the hot ledger stays bounded under steady load.
+ *
+ *  Every member is ALSO a member of COMPACTABLE_DERIVED_EVENT_KINDS — the
+ *  high-rate tier only chooses a SHORTER cutoff for these specific kinds; the
+ *  remaining derived kinds keep the 7d/1d pressure window. bridge_frame_received
+ *  is intentionally NOT here: it has its own lifecycle-gated 24h prune path
+ *  (compactBridgeFrames) which the 1h tier does not touch — the two passes
+ *  delete disjoint rows (this set is frame-free), so there is no double-delete. */
+export const HIGH_RATE_TELEMETRY_KINDS: readonly string[] = [
+  "constitutional_gate_decision",
+  "bridge_frame_received",
+  "worker_tick_completed",
+  "task_deferred_for_interference",
+  "brain_liveness_heartbeat",
+  "sandbox_unenforced_warning",
+];
+
+/** Retention window for high-rate pure-telemetry kinds (HIGH_RATE_TELEMETRY_
+ *  KINDS). 1 hour by default — these are emitted per-operation and have no
+ *  full-history reader, so a short window keeps the hot ledger bounded under
+ *  steady load. Env-overridable via ACC2_COMPACTION_HIGHRATE_RETENTION_MS for
+ *  operators who need a longer debugging window. The value is read once at
+ *  module load; pass `highRateRetentionMs` to compactDerivedEvents to override
+ *  per-call (tests do this). */
+const parseHighRateRetentionEnv = (): number => {
+  const raw = process.env.ACC2_COMPACTION_HIGHRATE_RETENTION_MS;
+  if (raw === undefined) return 60 * 60 * 1000; // 1h default
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 60 * 60 * 1000;
+};
+export const COMPACTION_HIGHRATE_RETENTION_MS = parseHighRateRetentionEnv();
+
 /** Retention window for derived telemetry. Rows of a
  *  COMPACTABLE_DERIVED_EVENT_KINDS kind older than this are eligible to prune.
  *  7 days keeps a generous debugging window while bounding the hot ledger.
@@ -169,18 +208,71 @@ export const compactBridgeFrames = (
   return { pruned_frames: pruned, pruned_derived: 0, cutoff_iso: cutoffIso };
 };
 
-/** Prune aged derived-telemetry rows (COMPACTABLE_DERIVED_EVENT_KINDS) older
- *  than COMPACTION_DERIVED_RETENTION_MS, bounded by batchSize. Returns the
- *  number of rows actually deleted. Idempotent; safe to call repeatedly.
+/** Resolve the retention window (ms) for a single derived-telemetry kind.
+ *  HIGH_RATE_TELEMETRY_KINDS get the short 1h high-rate window; every other
+ *  compactable derived kind gets the (pressure-compressed) derived window.
+ *  This is the per-kind cutoff selector the prune passes thread their tier
+ *  through — a kind in BOTH sets resolves to the high-rate (shorter) window. */
+export const retentionForKind = (
+  kind: string,
+  opts?: { derivedRetentionMs?: number; highRateRetentionMs?: number },
+): number => {
+  const derivedMs = opts?.derivedRetentionMs ?? COMPACTION_DERIVED_RETENTION_MS;
+  const highRateMs = opts?.highRateRetentionMs ?? COMPACTION_HIGHRATE_RETENTION_MS;
+  return HIGH_RATE_TELEMETRY_KINDS.includes(kind) ? highRateMs : derivedMs;
+};
+
+/** Bounded prune of a set of derived kinds older than `cutoffIso`. Shared by
+ *  both tiers; LIMIT keeps the write-lock window bounded. */
+const pruneKindsOlderThan = (
+  db: Database,
+  kinds: readonly string[],
+  cutoffIso: string,
+  batchSize: number,
+): number => {
+  if (kinds.length === 0 || batchSize <= 0) return 0;
+  const placeholders = kinds.map(() => "?").join(", ");
+  const result = db
+    .query(
+      `DELETE FROM events WHERE id IN (
+         SELECT id FROM events
+         WHERE kind IN (${placeholders})
+           AND ts < ?
+         LIMIT ?
+       )`,
+    )
+    .run(...kinds, cutoffIso, batchSize);
+  return Number(result.changes ?? 0);
+};
+
+/** Prune aged derived-telemetry rows (COMPACTABLE_DERIVED_EVENT_KINDS), bounded
+ *  by batchSize. Returns the total number of rows deleted across both tiers.
+ *  Idempotent; safe to call repeatedly.
+ *
+ *  Two-tier retention (convergence fix 2026-05-26):
+ *    - HIGH_RATE_TELEMETRY_KINDS (per-operation telemetry) are pruned past the
+ *      short 1h high-rate window (COMPACTION_HIGHRATE_RETENTION_MS, env-
+ *      overridable) — so they are evicted even when younger than the derived
+ *      1d floor. bridge_frame_received is in the high-rate set but is NOT
+ *      pruned here (it has its own lifecycle-gated compactBridgeFrames path);
+ *      excluding it from this pass means the two prune passes touch disjoint
+ *      rows — no double-delete, fully idempotent.
+ *    - All OTHER compactable derived kinds keep the existing (pressure-
+ *      compressed) 7d/1d derived window.
  *
  *  Unlike compactBridgeFrames, these kinds carry no per-task dispatch lifecycle
  *  — they are pure observation/telemetry with no downstream consumer past their
  *  short active window (see COMPACTABLE_DERIVED_EVENT_KINDS doc), so age alone
  *  is the prune predicate. load-bearing kinds (candidate_confirmed,
- *  origin_calibration_recorded) are intentionally NOT in the set. */
+ *  origin_calibration_recorded) are intentionally NOT in either set. */
 export const compactDerivedEvents = (
   db: Database,
-  opts?: { nowMs?: number; batchSize?: number; retentionMs?: number },
+  opts?: {
+    nowMs?: number;
+    batchSize?: number;
+    retentionMs?: number;
+    highRateRetentionMs?: number;
+  },
 ): number => {
   if (COMPACTABLE_DERIVED_EVENT_KINDS.length === 0) return 0;
   const nowMs = opts?.nowMs ?? Date.now();
@@ -193,20 +285,27 @@ export const compactDerivedEvents = (
   // load-bearing carve-outs are unchanged: candidate_confirmed and
   // origin_calibration_recorded are NOT in COMPACTABLE_DERIVED_EVENT_KINDS,
   // so pressure can never cause them to be pruned here.
-  const retentionMs = opts?.retentionMs ?? COMPACTION_DERIVED_RETENTION_MS;
-  const cutoffIso = new Date(nowMs - retentionMs).toISOString();
-  const placeholders = COMPACTABLE_DERIVED_EVENT_KINDS.map(() => "?").join(", ");
-  const result = db
-    .query(
-      `DELETE FROM events WHERE id IN (
-         SELECT id FROM events
-         WHERE kind IN (${placeholders})
-           AND ts < ?
-         LIMIT ?
-       )`,
-    )
-    .run(...COMPACTABLE_DERIVED_EVENT_KINDS, cutoffIso, batchSize);
-  return Number(result.changes ?? 0);
+  const derivedRetentionMs = opts?.retentionMs ?? COMPACTION_DERIVED_RETENTION_MS;
+  const highRateRetentionMs = opts?.highRateRetentionMs ?? COMPACTION_HIGHRATE_RETENTION_MS;
+
+  // Tier split. bridge_frame_received owns its own lifecycle-gated path
+  // (compactBridgeFrames) so it is dropped from BOTH derived passes here —
+  // keeping the two prune passes' deleted rows disjoint (no double-delete).
+  const highRateKinds = COMPACTABLE_DERIVED_EVENT_KINDS.filter(
+    (k) => HIGH_RATE_TELEMETRY_KINDS.includes(k) && k !== "bridge_frame_received",
+  );
+  const standardKinds = COMPACTABLE_DERIVED_EVENT_KINDS.filter(
+    (k) => !HIGH_RATE_TELEMETRY_KINDS.includes(k),
+  );
+
+  const highRateCutoffIso = new Date(nowMs - highRateRetentionMs).toISOString();
+  const standardCutoffIso = new Date(nowMs - derivedRetentionMs).toISOString();
+
+  // Each pass is independently bounded by batchSize so neither can wedge the
+  // write lock; the high-rate pass runs first since it is the bloat driver.
+  const prunedHighRate = pruneKindsOlderThan(db, highRateKinds, highRateCutoffIso, batchSize);
+  const prunedStandard = pruneKindsOlderThan(db, standardKinds, standardCutoffIso, batchSize);
+  return prunedHighRate + prunedStandard;
 };
 
 /** One compaction worker tick. Prunes frames + emits a substrate event
@@ -226,7 +325,14 @@ export const compactionWorkerTick = (db: Database): CompactionReport => {
     // size); it does not mutate state or touch credit-spine kinds.
     const policy = evaluateLedgerCurationPressure(db, {} as never, nowMs);
     const derivedRetentionMs = derivedRetentionForPressure(policy.pressure);
-    const prunedDerived = compactDerivedEvents(db, { nowMs, retentionMs: derivedRetentionMs });
+    // High-rate pure-telemetry kinds (HIGH_RATE_TELEMETRY_KINDS) use the short
+    // 1h tier (env-overridable) instead of the derived 7d/1d window — they
+    // are emitted per-operation and would otherwise dominate the hot ledger.
+    const prunedDerived = compactDerivedEvents(db, {
+      nowMs,
+      retentionMs: derivedRetentionMs,
+      highRateRetentionMs: COMPACTION_HIGHRATE_RETENTION_MS,
+    });
     const report: CompactionReport = {
       pruned_frames: frameReport.pruned_frames,
       pruned_derived: prunedDerived,
@@ -244,6 +350,8 @@ export const compactionWorkerTick = (db: Database): CompactionReport => {
             retention_ms: COMPACTION_FRAME_RETENTION_MS,
             derived_retention_ms: derivedRetentionMs,
             derived_retention_ms_default: COMPACTION_DERIVED_RETENTION_MS,
+            highrate_retention_ms: COMPACTION_HIGHRATE_RETENTION_MS,
+            highrate_telemetry_kinds: HIGH_RATE_TELEMETRY_KINDS as unknown as JsonValue,
             ledger_pressure: policy.pressure,
             ledger_pressure_source: policy.pressure_source,
             ledger_row_count: policy.row_count,
