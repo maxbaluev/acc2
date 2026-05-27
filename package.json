@@ -7,6 +7,8 @@
     "daemon": "bun runtime/daemon.ts",
     "acc": "bun cli/dispatch.ts",
     "test": "bun scripts/test.ts",
+    "test:all": "ACC2_TEST_TIER=all bun scripts/test.ts",
+    "test:slow": "ACC2_TEST_TIER=slow bun scripts/test.ts",
     "postinstall": "bun scripts/postinstall.ts"
   },
   "bin": {

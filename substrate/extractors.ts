@@ -898,27 +898,35 @@ const synthesizeName = (id: string, body: string): string => {
 export type ActArtifactScoreSummary = { updated: number; promoted: number };
 
 export const extractActArtifactScores = async (db: Database): Promise<ActArtifactScoreSummary> => {
+  const cursor = readMeta(db, META_KEYS.scores);
   // Inter-extractor fairness: macrotask boundary at the top of the body.
   await extractorFairnessYield();
-  // Bounded scan per KC GJ2KN1J3KD1Z: cap act_artifact rows scanned
-  // per tick. Ordering by updated_at (newest first) means rows updated
-  // most recently (i.e. with recent scored evidence) get re-scored
-  // each cycle; older artifacts still re-score as their action_scored
-  // children arrive. Idempotent: the UPDATE is a recompute and emits
-  // act_artifact_promoted only when threshold-crossing. The body column
-  // is text (synthesizeName reads it), so this scan is safe off-loop;
-  // routed via poolQuery (sync fallback). The per-artifact action_scored
-  // sub-query below stays sync — it runs inside the write transaction.
+
+  // Incremental hot path: a flat ledger now exits before touching artifacts.
+  const changed = await poolQuery<{ action_artifact_id: string; latest_ts: string }>(
+    db,
+    `SELECT action_artifact_id, MAX(ts) AS latest_ts FROM events
+       WHERE kind = 'action_scored'
+         AND action_artifact_id IS NOT NULL
+         AND residual IS NOT NULL
+         AND (? IS NULL OR ts > ?)
+       GROUP BY action_artifact_id
+       ORDER BY latest_ts ASC
+       LIMIT ?`,
+    [cursor, cursor, EXTRACTOR_SCAN_LIMIT],
+  );
+  if (changed.length === 0) return { updated: 0, promoted: 0 };
+  const artifactIds = changed.map((r) => r.action_artifact_id);
+  const placeholders = artifactIds.map(() => "?").join(", ");
   const artifacts = (await poolQuery<{ id: string; body: string; status: string; name: string | null }>(
     db,
-    `SELECT id, body, status, name FROM act_artifact
-       ORDER BY updated_at DESC
-       LIMIT ?`,
-    [EXTRACTOR_SCAN_LIMIT],
+    `SELECT id, body, status, name FROM act_artifact WHERE id IN (${placeholders})`,
+    artifactIds,
   ));
 
   let updated = 0;
   let promoted = 0;
+  let latestTs = cursor;
 
   // Yield BEFORE the transaction (the scan loop holds the write lock
   // inside withImmediateTransaction; yielding inside would stall
@@ -987,6 +995,7 @@ export const extractActArtifactScores = async (db: Database): Promise<ActArtifac
         [alpha, beta, score, confidence, recentMean, newStatus, newName, nowIso(), art.id],
       );
       updated++;
+      latestTs = events[events.length - 1]?.ts ?? latestTs;
       if (shouldPromote) {
         promoted++;
         // Brain audit B (2026-05-15): pre-fix extractActArtifactScores
@@ -1017,6 +1026,8 @@ export const extractActArtifactScores = async (db: Database): Promise<ActArtifac
         });
       }
     }
+    const newestChangedTs = changed[changed.length - 1]?.latest_ts;
+    if (newestChangedTs) writeMeta(db, META_KEYS.scores, newestChangedTs);
   });
 
   return { updated, promoted };
@@ -2335,19 +2346,21 @@ export const extractRecipeCandidates = async (db: Database): Promise<RecipeCandi
   // Inter-extractor fairness: macrotask boundary before the heavy scans.
   await extractorFairnessYield();
 
-  // Pull every recent task_committed event in the 30-day window.
-  // Bounded by EXTRACTOR_SCAN_LIMIT per KC GJ2KN1J3KD1Z. Routed off-loop
-  // via poolQuery (sync fallback) — scalar+text columns only.
+  // Incremental scan: only new task_committed rows enter the expensive
+  // goal_shape/topology grouping path. The 30-day cutoff remains a safety floor.
   const cutoff = new Date(Date.now() - THIRTY_DAYS_MS).toISOString();
   const committed = (await poolQuery<Record<string, unknown>>(
     db,
     `SELECT id, ts, directive_id, task_id, loop_id, substrate_origin, payload
        FROM events
-       WHERE kind = 'task_committed' AND ts >= ?
+       WHERE kind = 'task_committed'
+         AND ts >= ?
+         AND (? IS NULL OR ts > ?)
        ORDER BY ts ASC
        LIMIT ?`,
-    [cutoff, EXTRACTOR_SCAN_LIMIT],
+    [cutoff, cursor, cursor, EXTRACTOR_SCAN_LIMIT],
   ));
+  if (committed.length === 0) return { extracted: 0, deferred: 0 };
   // Yield once after the big read so the daemon /health route and
   // peer workers can advance before we walk the per-directive
   // sub-queries.
@@ -2401,7 +2414,7 @@ export const extractRecipeCandidates = async (db: Database): Promise<RecipeCandi
 
   let extracted = 0;
   let deferred = 0;
-  let latestTs = cursor;
+  let latestTs = committed[committed.length - 1]?.ts as string | null;
 
   withImmediateTransaction(db, () => {
     for (const [compositeKey, entries] of shapeGroups) {

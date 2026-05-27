@@ -326,3 +326,10 @@ no `state/` subdir under the state root and no fallback into the source
 tree — the resolver always lands at `${stateDir}/state.db`. Sweep stale
 `/tmp/acc2-harness-*` and `/tmp/acc2-cli-*` dirs left behind by
 integration / smoke runs with `acc admin clean-temp-state`.
+
+
+## Test And Daemon Load Contract
+
+The default inner-loop command is `bun run test`. It runs the fast isolated tier and intentionally excludes daemon/bridge/MCP/real-integration files so the suite does not require or compete with a live daemon. Use `bun run test:all` for the full local pass and `bun run test:slow` for the slower daemon/bridge tier.
+
+Daemon workers must be idle-cheap: if the event ledger is flat, extractor/scoring work must advance from stored cursors and return without full-ledger rescans. `worker_tick_completed` rows include per-worker duration and process CPU deltas when measured so hot idle workers can be identified from normal telemetry.

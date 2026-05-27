@@ -528,7 +528,9 @@ const supervisedTick = (
     recordWorkerTickStart(workerName, now); // Tier D D1: in-flight heartbeat
     void (async () => {
       try {
+        const cpuStart = process.cpuUsage();
         await body();
+        const cpuDelta = process.cpuUsage(cpuStart);
         recordWorkerTick(workerName);
         // Audit-#5 (2026-05-15): emit a rate-limited `worker_tick_completed`
         // so the substrate carries proof of liveness for every worker, not
@@ -547,6 +549,8 @@ const supervisedTick = (
                 worker: workerName,
                 expected_interval_ms: intervalMs,
                 tick_duration_ms: elapsedMs,
+                cpu_user_us: cpuDelta.user,
+                cpu_system_us: cpuDelta.system,
                 dampen_ms: WORKER_TICK_EVENT_DAMPEN_MS,
               },
             });

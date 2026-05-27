@@ -72,6 +72,27 @@ const computeWorkers = (): { workers: number; avail: number } => {
 };
 
 const forwarded = Bun.argv.slice(2);
+const tier = process.env.ACC2_TEST_TIER ?? "fast";
+const explicitFiles = forwarded.some((a) => /\.test\.ts$/.test(a));
+const tierFlag = forwarded.find((a) => a === "--all" || a === "--slow" || a === "--fast");
+if (tierFlag) forwarded.splice(forwarded.indexOf(tierFlag), 1);
+const effectiveTier = tierFlag === "--all" ? "all" : tierFlag === "--slow" ? "slow" : tierFlag === "--fast" ? "fast" : tier;
+const SLOW_TEST_RE = /(^|\/)(daemon|bridge|mcp|integration|real_|.*\.slow)\.test\.ts$|daemon_|_daemon|real-brain|real_bridge/i;
+const collectTestFiles = (dir = "."): string[] => {
+  const out: string[] = [];
+  for (const name of readdirSync(dir, { withFileTypes: true })) {
+    if (name.name === "node_modules" || name.name.startsWith(".worktree") || name.name === ".git") continue;
+    const rel = dir === "." ? name.name : dir + "/" + name.name;
+    if (name.isDirectory()) out.push(...collectTestFiles(rel));
+    else if (name.isFile() && rel.endsWith(".test.ts")) out.push(rel);
+  }
+  return out.sort();
+};
+const tierFiles = (): string[] => {
+  if (explicitFiles || effectiveTier === "all") return [];
+  const files = collectTestFiles();
+  return effectiveTier === "slow" ? files.filter((f) => SLOW_TEST_RE.test(f)) : files.filter((f) => !SLOW_TEST_RE.test(f));
+};
 
 // Sweep stale `acc2-*` scratch dirs out of the OS temp dir before a run.
 //
@@ -165,7 +186,8 @@ const runSuite = async (
   bail: boolean,
   opts: { files?: string[]; capture?: boolean } = {},
 ): Promise<SuiteResult> => {
-  const args = ["test", `--parallel=${parallel}`, ...(bail ? ["--bail"] : []), ...forwarded, ...(opts.files ?? [])];
+  const selectedFiles = opts.files ?? tierFiles();
+  const args = ["test", `--parallel=${parallel}`, ...(bail ? ["--bail"] : []), ...forwarded, ...selectedFiles];
   if (!opts.capture) {
     const proc = Bun.spawn(["bun", ...args], { stdio: ["inherit", "inherit", "inherit"] });
     return { code: await proc.exited, output: "" };
@@ -207,7 +229,9 @@ const runSuite = async (
 if (import.meta.main) {
   sweepStaleTmpDirs();
   const { workers, avail } = computeWorkers();
-  console.error(`[acc2 test] ${workers} parallel workers (cores=${cpus().length}, available=${(avail / 1e9).toFixed(1)}GB, ceiling=${MAX_WORKERS})`);
+  const selected = tierFiles();
+  const tierNote = selected.length > 0 ? ", files=" + selected.length : "";
+  console.error(`[acc2 test] ${workers} parallel workers (tier=${effectiveTier}${tierNote}, cores=${cpus().length}, available=${(avail / 1e9).toFixed(1)}GB, ceiling=${MAX_WORKERS})`);
 
   // First pass: run the FULL suite WITHOUT --bail, capturing output so a
   // non-zero exit can be triaged to the specific failed file(s).
