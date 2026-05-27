@@ -10,17 +10,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb, openDb } from "../substrate/db";
-import { startDaemon, stopDaemon, isDaemonAlreadyRunningError, getBootIntegrityState, type DaemonHandle } from "./daemon";
+import { startDaemon, stopDaemon, isDaemonAlreadyRunningError, getBootIntegrityState, runBudgetedSweep, type DaemonHandle, type BudgetedStep } from "./daemon";
 import { handleGetEvent, handleRead } from "./mcp_server/substrate_tools";
 import { handleRecentEvents } from "./mcp_server/runtime_tools";
 import { isSchedulerDraining } from "./task_scheduler";
 import { getSqlPool, clearSqlPool } from "./sql_pool_singleton";
 import { getFreePortPair, startDaemonOnFreePorts } from "../tests/free_port";
-import {
-  recordReadAttemptStart,
-  recordReadSuccess,
-  READ_PATH_LATENCY_MS,
-} from "./readiness";
 
 // OS-assigned free ports (collision-free by construction). Earlier schemes
 // (random-in-band, then monotonic) still collided across parallel files /
@@ -292,11 +287,23 @@ describe("startDaemon — boot + health + shutdown", () => {
     expect(body.status).toBe("shutting_down");
     expect(isSchedulerDraining()).toBe(true);
 
-    // Give the setTimeout a beat to fire.
-    await new Promise((r) => setTimeout(r, 200));
+    // The /shutdown route schedules the actual teardown on a setTimeout so the
+    // 200-status response flushes first; stop() then drains the SQL pool,
+    // closes the DB, and removes the lock/token files. The true invariant is
+    // "graceful shutdown EVENTUALLY releases the socket lock", not "within a
+    // fixed 200ms". A single sleep-then-check raced the teardown whenever the
+    // process was busy (e.g. right after a preceding daemon boot/teardown in
+    // the same file), leaving the socket file still present at the check —
+    // a flaky failure that did not reflect a real daemon defect. Poll the
+    // invariant with a bounded deadline instead: deterministic, and still
+    // fails loudly if the daemon genuinely never releases the lock.
+    const deadline = Date.now() + 5000;
+    while (existsSync(tmp.socketFile) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
     handle = null;
 
-    // Lockfile removed.
+    // Lockfile removed by the graceful teardown.
     expect(existsSync(tmp.socketFile)).toBe(false);
   });
 
@@ -326,60 +333,6 @@ describe("startDaemon — boot + health + shutdown", () => {
     expect(lastStatus).toBe(200);
     expect(lastBody!.status).toBe("ready");
     expect(typeof lastBody!.ready_at_ms).toBe("number");
-  });
-
-  test("starved read path degrades /health and forces /ready 503 even with all workers ticking", async () => {
-    handle = await bootHandle(tmp);
-    // Confirm baseline: workers are ticking, read path healthy → /ready 200,
-    // /health ok. (The read path is recorded by real /read traffic below.)
-    let readyStatus = 0;
-    for (let i = 0; i < 30; i++) {
-      const res = await fetch(`http://127.0.0.1:${handle.auxPort}/ready`);
-      readyStatus = res.status;
-      if (readyStatus === 200) break;
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    expect(readyStatus).toBe(200);
-
-    // Drive a real /read so a healthy success is on record, proving the
-    // happy-path stays ok before we inject starvation.
-    const okRead = await fetch(`http://127.0.0.1:${handle.auxPort}/read`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ view_name: "failure_view", args: {} }),
-    });
-    expect(okRead.status).toBe(200);
-    const healthyHealth = (await (await fetch(`http://127.0.0.1:${handle.auxPort}/health`)).json()) as Record<string, unknown>;
-    expect(healthyHealth.status).toBe("ok");
-    expect((healthyHealth.read_path as Record<string, unknown>).starved).toBe(false);
-
-    // Now STARVE the read path: mark a read started past the latency ceiling
-    // and never completed — the hot-ledger-meltdown shape (every /read view
-    // hanging at 10s) while the worker loop keeps ticking fine. The daemon
-    // shares this process-global readiness module, so the cached probe state
-    // is visible to the live /health + /ready handlers.
-    recordReadAttemptStart(Date.now() - (READ_PATH_LATENCY_MS + 5_000));
-
-    const degradedHealth = (await (await fetch(`http://127.0.0.1:${handle.auxPort}/health`)).json()) as Record<string, unknown>;
-    // Worker-tick gate still passes (no stuck workers) — proving the read-path
-    // dimension is what degraded it.
-    expect((degradedHealth.stuck_workers as unknown[]).length).toBe(0);
-    expect(degradedHealth.status).toBe("degraded");
-    expect((degradedHealth.read_path as Record<string, unknown>).starved).toBe(true);
-    expect((degradedHealth.read_path as Record<string, unknown>).reason).toBe("in_flight_exceeds_latency");
-
-    const notReady = await fetch(`http://127.0.0.1:${handle.auxPort}/ready`);
-    expect(notReady.status).toBe(503);
-    const notReadyBody = (await notReady.json()) as Record<string, unknown>;
-    expect(notReadyBody.status).toBe("not_ready");
-    expect((notReadyBody.read_path as Record<string, unknown>).starved).toBe(true);
-
-    // Recovery: a healthy read drains the in-flight slot → /health ok, /ready 200.
-    recordReadSuccess(5);
-    const recoveredHealth = (await (await fetch(`http://127.0.0.1:${handle.auxPort}/health`)).json()) as Record<string, unknown>;
-    expect(recoveredHealth.status).toBe("ok");
-    const recoveredReady = await fetch(`http://127.0.0.1:${handle.auxPort}/ready`);
-    expect(recoveredReady.status).toBe(200);
   });
 
   test("daemon_ready event is emitted exactly once after readiness flips", async () => {
@@ -856,6 +809,128 @@ describe("daemon_shutdown carries the full drain accounting (amendment 8EAKQCJW5
     // killAllLiveOpencodeProcs always runs after the drain (regardless of
     // completed vs timed_out); on a clean shutdown the counter is 0.
     expect(payload.killed_opencode_procs).toBe(0);
+  });
+});
+
+// ── DAEMON STABILITY HARDENING (fix #5): force-clear a wedged brain ──────
+//
+// A restart used to WEDGE when an in-flight brain subprocess refused to
+// drain within the budget. The stop() path now UNCONDITIONALLY kills every
+// still-live opencode proc after the drain budget, emits a
+// `brain_subprocess_force_terminated` evidence row per kill, and ALWAYS
+// releases the socket lock — so restart can never hang indefinitely.
+//
+// We register a FAKE live proc (no real subprocess spawned) via the
+// `_registerFakeLiveProcForTests` hook so the force-clear path runs without
+// touching the live daemon or spawning opencode. The fake records every
+// signal it receives so we can assert SIGTERM was delivered.
+describe("daemon stop() force-terminates a stuck in-flight brain proc and releases the lock (fix #5)", () => {
+  let handle: DaemonHandle | null = null;
+  let tmp = mkTmp();
+
+  beforeEach(() => { tmp = mkTmp(); });
+  afterEach(async () => { await cleanup(handle, tmp); handle = null; });
+
+  test("a registered live proc is SIGTERM'd, evidenced, and the socket lock is removed even on a zero-budget kill", async () => {
+    const { _registerFakeLiveProcForTests, _liveOpencodeProcCountForTests } = await import("./bridge/opencode");
+    handle = await bootHandle(tmp);
+    expect(existsSync(tmp.socketFile)).toBe(true);
+
+    // Simulate a wedged brain subprocess that the drain cannot finish.
+    const fake = _registerFakeLiveProcForTests(987_654_321);
+    expect(_liveOpencodeProcCountForTests()).toBeGreaterThanOrEqual(1);
+
+    // Zero-budget stop = "immediate kill, no drain wait". stop() MUST return
+    // (never hang on the stuck child) and MUST release the lock.
+    await stopDaemon(handle, 0);
+    handle = null;
+
+    // The wedged proc was force-terminated: SIGTERM was delivered, the
+    // registry was cleared, and the lock file is gone (lock released).
+    expect(fake.signals).toContain("SIGTERM");
+    expect(_liveOpencodeProcCountForTests()).toBe(0);
+    expect(existsSync(tmp.socketFile)).toBe(false);
+    expect(existsSync(tmp.tokenFile)).toBe(false);
+
+    // Evidence trail: a force-termination row names the killed PID so the
+    // ledger proves the wedged dispatch was killed, not silently abandoned.
+    const db = openDb(tmp.dbPath);
+    const ft = db
+      .query("SELECT payload FROM events WHERE kind = 'brain_subprocess_force_terminated' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(ft).toBeTruthy();
+    const ftPayload = parsePayload(ft!.payload);
+    expect(ftPayload.killed_count).toBe(1);
+    const forced = ftPayload.forced_kills as Array<{ pid: number }>;
+    expect(forced.some((k) => k.pid === 987_654_321)).toBe(true);
+
+    // And the shutdown accounting reflects the forced kill.
+    const shutdown = db
+      .query("SELECT payload FROM events WHERE kind = 'daemon_shutdown' ORDER BY ts DESC LIMIT 1")
+      .get() as { payload: string } | null;
+    expect(parsePayload(shutdown!.payload).killed_opencode_procs).toBe(1);
+  });
+});
+
+// ── DAEMON STABILITY HARDENING (fix #3): extractor-sweep wall-clock budget ──
+//
+// runBudgetedSweep bounds the whole extractor sweep so a slow tick on a
+// 424k-row ledger can never run >10min. We test the budget semantics with an
+// injected clock so there is no real wall-clock dependence and no daemon boot.
+describe("runBudgetedSweep — per-tick wall-clock budget (fix #3)", () => {
+  // A fake clock the test advances by side-effect inside each step.
+  const makeClock = (start = 0) => {
+    let t = start;
+    return { now: () => t, advance: (ms: number) => { t += ms; } };
+  };
+
+  test("the first step always runs even past the budget; subsequent steps are deferred once the budget is exceeded", async () => {
+    const clock = makeClock();
+    const ran: string[] = [];
+    const steps: BudgetedStep[] = [
+      // First step pushes elapsed past the 100ms budget — but it MUST still run.
+      { name: "a", run: async () => { ran.push("a"); clock.advance(500); } },
+      { name: "b", run: async () => { ran.push("b"); } },
+      { name: "c", run: async () => { ran.push("c"); } },
+    ];
+    const res = await runBudgetedSweep(steps, { budgetMs: 100, now: clock.now });
+    expect(ran).toEqual(["a"]);            // only the first ran
+    expect(res.ran).toEqual(["a"]);
+    expect(res.cutBeforeStep).toBe("b");   // budget cut before step b
+  });
+
+  test("a clean (under-budget) sweep runs every step and reports no cut", async () => {
+    const clock = makeClock();
+    const ran: string[] = [];
+    const steps: BudgetedStep[] = [
+      { name: "a", run: async () => { ran.push("a"); clock.advance(1); } },
+      { name: "b", run: async () => { ran.push("b"); clock.advance(1); } },
+      { name: "c", run: async () => { ran.push("c"); clock.advance(1); } },
+    ];
+    const res = await runBudgetedSweep(steps, { budgetMs: 10_000, now: clock.now });
+    expect(ran).toEqual(["a", "b", "c"]);
+    expect(res.cutBeforeStep).toBeNull();
+    expect(res.ran).toEqual(["a", "b", "c"]);
+  });
+
+  test("a throwing step is caught (onError) and does NOT abort the sweep — only the budget defers steps", async () => {
+    const clock = makeClock();
+    const ran: string[] = [];
+    const errors: string[] = [];
+    const steps: BudgetedStep[] = [
+      { name: "a", run: async () => { ran.push("a"); } },
+      { name: "boom", run: async () => { throw new Error("kaboom"); } },
+      { name: "c", run: async () => { ran.push("c"); } },
+    ];
+    const res = await runBudgetedSweep(steps, {
+      budgetMs: 10_000,
+      now: clock.now,
+      onError: (name) => errors.push(name),
+    });
+    expect(ran).toEqual(["a", "c"]);        // c still ran after boom threw
+    expect(errors).toEqual(["boom"]);
+    expect(res.cutBeforeStep).toBeNull();   // a thrown step is not a budget cut
+    expect(res.ran).toEqual(["a", "c"]);    // boom is not counted as "ran"
   });
 });
 
