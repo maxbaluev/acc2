@@ -37,6 +37,7 @@ import { parseOpencodeAuth } from "../../cli/doctor";
 import type { BridgeFailureReason, BridgeRequest, BridgeResult, SpawnOpts } from "./types";
 import {
   BRAIN_OPENCODE_AGENT_NAME,
+  DEFAULT_BRAIN_INACTIVITY_MS,
   DEFAULT_BRIDGE_FIRST_FRAME_THRESHOLD_MS,
   DEFAULT_MCP_HANDSHAKE_WINDOW_MS,
   DEFAULT_OPENCODE_MODEL,
@@ -66,6 +67,13 @@ const LIVE_OPENCODE_PROCS: Set<LiveProc> = new Set();
 let _cachedMaxBrainRssBytes = 0;
 let _lastRssSampleMs = 0;
 const RSS_SAMPLE_INTERVAL_MS = 5000;
+
+const readPositiveMsEnv = (name: string): number | null => {
+  const raw = process.env[name];
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+};
 
 /** Cached peak RSS (bytes) across live opencode brain subprocesses, read from
  *  /proc/<pid>/status (Linux). Re-samples at most once per 5s; returns the
@@ -469,7 +477,8 @@ export const spawnRealOpencode = async (
 ): Promise<BridgeResult> => {
   const bridgeStartedAtMs = Date.now();
   const model = spawnOpts.model ?? process.env.ACC2_OPENCODE_MODEL ?? DEFAULT_OPENCODE_MODEL;
-  const timeoutMs = spawnOpts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = spawnOpts.timeoutMs ?? readPositiveMsEnv("ACC2_OPENCODE_TIMEOUT_MS") ?? DEFAULT_TIMEOUT_MS;
+  const brainInactivityMs = spawnOpts.brainInactivityMs ?? readPositiveMsEnv("ACC2_BRAIN_INACTIVITY_MS") ?? DEFAULT_BRAIN_INACTIVITY_MS;
   const spawn = spawnOpts.spawnFn ?? Bun.spawn;
   const handshakeWindowMs = spawnOpts.mcpHandshakeWindowMs ?? DEFAULT_MCP_HANDSHAKE_WINDOW_MS;
   const firstFrameThresholdMs = spawnOpts.firstFrameThresholdMs ?? DEFAULT_BRIDGE_FIRST_FRAME_THRESHOLD_MS;
@@ -485,7 +494,8 @@ export const spawnRealOpencode = async (
       model,
       real: true,
       budget_estimate: {
-        wall_ms: timeoutMs,
+        absolute_backstop_ms: timeoutMs,
+        brain_inactivity_ms: brainInactivityMs,
         mcp_handshake_window_ms: handshakeWindowMs,
         first_frame_threshold_ms: firstFrameThresholdMs,
       },
@@ -1064,10 +1074,36 @@ export const spawnRealOpencode = async (
     closeBrainDispatch("brain_subprocess_exited");
   });
 
-  // Watchdog: SIGTERM at timeoutMs, SIGKILL at timeoutMs * 1.5.
+  // Watchdog: SIGTERM on true inactivity, with timeoutMs retained as the
+  // absolute runaway backstop. The old flat-wall timeout killed active brains;
+  // the backstop only fires when a dispatch outlives even the generous ceiling.
   let killed = false;
+  let watchdogKillReason: "inactivity_kill" | "backstop_kill" | null = null;
   const sigTerm = setTimeout(() => {
+    if (bridgeStuckFired) return;
     killed = true;
+    bridgeStuckFired = true;
+    watchdogKillReason = "backstop_kill";
+    const now = Date.now();
+    try {
+      emitEvent(db, {
+        kind: "bridge_stuck",
+        substrate_origin: "opencode",
+        directive_id: req.directiveId,
+        task_id: req.taskId,
+        payload: {
+          reason: "backstop_kill",
+          elapsed_ms: now - bridgeStartedAtMs,
+          last_mcp_activity_ms_ago: Math.max(0, now - lastMcpActivityMs),
+          threshold_ms: timeoutMs,
+          inactivity_threshold_ms: brainInactivityMs,
+          first_frame_seen: firstFrameSeen,
+          tier: "absolute_backstop",
+          substrate_progress_observed: lastSubstrateProgressCount > 0,
+        } as JsonValue,
+        invoker: "opencode",
+      });
+    } catch { /* db may be closing; SIGTERM remains load-bearing */ }
     try { proc.kill("SIGTERM"); } catch { /* swallow */ }
   }, timeoutMs);
   const sigKill = setTimeout(() => {
@@ -1109,25 +1145,18 @@ export const spawnRealOpencode = async (
     }
   }, Math.min(5_000, Math.max(500, Math.floor(handshakeWindowMs / 10))));
 
-  // ── No-progress watchdog (robustness, fail-fast) ──
-  // The watchdog only fires BEFORE the first MCP frame lands. Once
-  // `firstFrameSeen` flips true (the subprocess proved it can drive
-  // MCP), the watchdog disables itself — the overall `timeoutMs`
-  // budget (default 600s) becomes the sole inter-frame cap. Live
-  // ledger evidence proved an inter-frame watchdog at any sub-overall
-  // threshold (90s, 240s) kills the brain mid-strategic-synthesis;
-  // the brain legitimately reasons silently for minutes between MCP
-  // tool calls.
-  // Surfaced as `bridge_stuck` with `tier=first_frame` when it fires,
-  // and `tier=disabled` would only appear in the (impossible-by-
-  // construction) case where firstFrameSeen flipped and then somehow
-  // the watchdog fired anyway — we never emit it in practice.
+  // ── Activity watchdog (robustness, fail-fast) ──
+  // Before the first MCP/substrate frame, preserve the generous first-frame
+  // budget. After the brain proves it can call MCP, keep polling substrate for
+  // fresh brain-originated events and SIGTERM only after true inactivity.
   const stuckStartMs = Date.now();
   let lastFrameMs = stuckStartMs;
+  let lastMcpActivityMs = stuckStartMs;
+  let lastSubstrateProgressCount = 0;
   let firstFrameSeen = false;
   let framesReceivedCount = 0;
   let bridgeStuckFired = false;
-  const pollCadenceMs = Math.min(5_000, Math.max(500, Math.floor(firstFrameThresholdMs / 8)));
+  const pollCadenceMs = Math.min(5_000, Math.max(500, Math.floor(Math.min(firstFrameThresholdMs, brainInactivityMs) / 8)));
   // Substrate-side progress reconciliation (FOUNDATIONAL FIX 2026-05-16):
   // opencode 1.4.3 routes MCP via internal HTTP, so stdout `firstFrameSeen`
   // stays false forever even when the brain is actively making progress via
@@ -1141,34 +1170,35 @@ export const spawnRealOpencode = async (
   // The reconciliation: flip firstFrameSeen=true if substrate has any
   // events with task_id=req.taskId AND invoker='claude_root' since dispatch
   // start. Same canonical truth source as the exit-time handshake check.
-  const checkSubstrateProgress = (): boolean => {
+  const checkSubstrateProgress = (): number => {
     try {
       const sinceIso = new Date(stuckStartMs).toISOString();
       const hit = db
-        .query<{ n: number }, [string, string]>(
-          `SELECT COUNT(*) AS n FROM events
+        .query<{ n: number; latest_ts: string | null }, [string, string]>(
+          `SELECT COUNT(*) AS n, MAX(ts) AS latest_ts FROM events
            WHERE task_id = ?
              AND ts >= ?
              AND invoker = 'claude_root'`,
         )
         .get(req.taskId, sinceIso);
-      return !!hit && hit.n > 0;
-    } catch { return false; }
+      const n = hit?.n ?? 0;
+      if (n > lastSubstrateProgressCount) {
+        lastSubstrateProgressCount = n;
+        const latestMs = hit?.latest_ts ? Date.parse(hit.latest_ts) : NaN;
+        lastMcpActivityMs = Number.isFinite(latestMs) ? Math.max(lastMcpActivityMs, latestMs) : Date.now();
+      }
+      return n;
+    } catch { return lastSubstrateProgressCount; }
   };
 
   const stuckInterval = setInterval(() => {
     if (bridgeStuckFired) return;
-    // Once we've seen a frame, the subprocess is alive — trust the
-    // overall timeout (600s default) as the cap. This is the
-    // load-bearing fix: pre-fix inter-frame watchdog killed slow
-    // legitimate brain reasoning between MCP calls.
-    if (firstFrameSeen) return;
-    // Substrate-side progress check: if the brain has been emitting
-    // events via the v2 MCP server (invoker='claude_root'), that proves
-    // the subprocess is alive and making progress even though stdout is
-    // silent. Flip firstFrameSeen so the watchdog disables itself for
-    // the remainder of the dispatch (the overall timeout takes over).
-    if (checkSubstrateProgress()) {
+    const substrateProgressCount = checkSubstrateProgress();
+    // Substrate-side progress check: if the brain has been emitting events via
+    // the v2 MCP server (invoker='claude_root'), that proves the subprocess is
+    // alive and making progress even when stdout is silent. Keep polling for
+    // the whole dispatch; fresh events slide lastMcpActivityMs forward.
+    if (substrateProgressCount > 0 && !firstFrameSeen) {
       firstFrameSeen = true;
       lastFrameMs = Date.now();
       // Also flip the handshake flag — substrate progress IS the handshake
@@ -1194,7 +1224,7 @@ export const spawnRealOpencode = async (
             detection_path: "substrate_progress_watchdog",
             mcp_server_url: mcpServerUrl,
             server_name: V2_OPENCODE_MCP_SERVER_NAME,
-            note: "opencode 1.4 routes MCP via HTTP; watchdog detected brain progress via substrate poll, not stdout. Disabling no-frames watchdog for the remainder of the dispatch.",
+            note: "opencode routes MCP via HTTP; watchdog detected brain progress via substrate poll, not stdout. Future polls now enforce inactivity rather than a flat wall-clock kill.",
           } as JsonValue,
           invoker: "opencode",
         });
@@ -1202,9 +1232,14 @@ export const spawnRealOpencode = async (
       return;
     }
     const now = Date.now();
+    const thresholdMs = mcpHandshakeOk ? brainInactivityMs : firstFrameThresholdMs;
     const sinceLastFrame = now - lastFrameMs;
-    if (sinceLastFrame < firstFrameThresholdMs) return;
+    const sinceLastMcpActivity = now - lastMcpActivityMs;
+    const sinceActivity = mcpHandshakeOk ? sinceLastMcpActivity : sinceLastFrame;
+    if (sinceActivity < thresholdMs) return;
     bridgeStuckFired = true;
+    killed = true;
+    watchdogKillReason = mcpHandshakeOk ? "inactivity_kill" : null;
     const elapsedMs = now - stuckStartMs;
     try {
       emitEvent(db, {
@@ -1213,13 +1248,16 @@ export const spawnRealOpencode = async (
         directive_id: req.directiveId,
         task_id: req.taskId,
         payload: {
-          reason: "no_frames_received",
+          reason: mcpHandshakeOk ? "inactivity_kill" : "no_frames_received",
           elapsed_ms: elapsedMs,
           last_frame_ms_ago: sinceLastFrame,
-          threshold_ms: firstFrameThresholdMs,
-          first_frame_seen: false,
-          tier: "first_frame",
-          substrate_progress_observed: false,
+          last_mcp_activity_ms_ago: sinceLastMcpActivity,
+          threshold_ms: thresholdMs,
+          inactivity_threshold_ms: brainInactivityMs,
+          first_frame_seen: firstFrameSeen,
+          tier: mcpHandshakeOk ? "inactivity" : "first_frame",
+          substrate_progress_observed: lastSubstrateProgressCount > 0,
+          substrate_events_observed: lastSubstrateProgressCount,
         } as JsonValue,
         invoker: "opencode",
       });
@@ -1505,6 +1543,7 @@ export const spawnRealOpencode = async (
       // generous first-frame budget to the tight inter-frame threshold.
       lastFrameMs = Date.now();
       firstFrameSeen = true;
+      lastMcpActivityMs = Date.now();
       emitEvent(db, {
         kind: "bridge_frame_received",
         substrate_origin: "opencode",
@@ -1635,13 +1674,16 @@ export const spawnRealOpencode = async (
   const budgetObserved = (terminalReason: string): Record<string, JsonValue> => ({
     terminal_reason: terminalReason,
     wall_ms: bridgeElapsedMs(),
-    timeout_ms: timeoutMs,
+    absolute_backstop_ms: timeoutMs,
+    brain_inactivity_ms: brainInactivityMs,
     mcp_handshake_window_ms: handshakeWindowMs,
     mcp_handshake_timed_out: mcpHandshakeTimedOut,
     mcp_handshake_ok: mcpHandshakeOk,
     first_frame_threshold_ms: firstFrameThresholdMs,
     first_frame_seen: firstFrameSeen,
     bridge_stuck_fired: bridgeStuckFired,
+    watchdog_kill_reason: watchdogKillReason,
+    last_mcp_activity_ms_ago: Math.max(0, Date.now() - lastMcpActivityMs),
   });
 
   // ── Substrate-side handshake reconciliation (foundational fix 2026-05-16) ──
@@ -2036,10 +2078,12 @@ export const spawnRealOpencode = async (
         // Brain audit E (2026-05-15): normalize mcp_handshake_ok on
         // every bridge terminal event for single-query handshake health.
         mcp_handshake_ok: mcpHandshakeOk,
-        no_frames_received: true,
-        threshold_ms: firstFrameThresholdMs,
-        first_frame_seen: false,
-        tier: "first_frame",
+        no_frames_received: watchdogKillReason !== "backstop_kill" && !mcpHandshakeOk,
+        threshold_ms: watchdogKillReason === "backstop_kill" ? timeoutMs : (mcpHandshakeOk ? brainInactivityMs : firstFrameThresholdMs),
+        inactivity_threshold_ms: brainInactivityMs,
+        first_frame_seen: firstFrameSeen,
+        tier: watchdogKillReason === "backstop_kill" ? "absolute_backstop" : (mcpHandshakeOk ? "inactivity" : "first_frame"),
+        watchdog_kill_reason: watchdogKillReason ?? (mcpHandshakeOk ? "inactivity_kill" : null),
         exit_code: exitCode,
         budget_observed: budgetObserved("subprocess_stuck"),
         // FOUNDATIONAL: same deep diagnostics on the watchdog-kill path so
@@ -2058,7 +2102,11 @@ export const spawnRealOpencode = async (
       ok: false,
       reason: {
         kind: "subprocess_crash",
-        stderr_tail: `subprocess_stuck:no_frames_received in ${firstFrameThresholdMs}ms tier=first_frame`,
+        stderr_tail: watchdogKillReason === "backstop_kill"
+          ? `subprocess_stuck:backstop_kill in ${timeoutMs}ms tier=absolute_backstop`
+          : (mcpHandshakeOk
+            ? `subprocess_stuck:inactivity_kill in ${brainInactivityMs}ms tier=inactivity`
+            : `subprocess_stuck:no_frames_received in ${firstFrameThresholdMs}ms tier=first_frame`),
       },
     };
   }
@@ -2090,11 +2138,14 @@ export const spawnRealOpencode = async (
       directive_id: req.directiveId,
       task_id: req.taskId,
       payload: {
-        reason: "timeout",
-        timeout_mode: "overall_wall_clock",
+        reason: watchdogKillReason === "backstop_kill" ? "backstop_kill" : "timeout",
+        timeout_mode: watchdogKillReason === "backstop_kill" ? "absolute_backstop" : "overall_wall_clock",
         ms_elapsed: bridgeElapsedMs(),
         timeout_ms: timeoutMs,
-        killed_by: "overall_timeout_sigterm",
+        absolute_backstop_ms: timeoutMs,
+        brain_inactivity_ms: brainInactivityMs,
+        killed_by: watchdogKillReason === "backstop_kill" ? "absolute_backstop_sigterm" : "overall_timeout_sigterm",
+        watchdog_kill_reason: watchdogKillReason,
         mcp_handshake_ok: mcpHandshakeOk,
         mcp_handshake_timed_out: mcpHandshakeTimedOut,
         budget_observed: budgetObserved("timeout"),

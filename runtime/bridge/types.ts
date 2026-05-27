@@ -95,6 +95,9 @@ export type SpawnOpts = {
    *  real MCP server bound; setting this true keeps unit tests fast and
    *  hermetic. Production callers leave undefined. */
   skipMcpReadinessProbe?: boolean;
+  /** Override the inactivity watchdog window. Production uses
+   *  ACC2_BRAIN_INACTIVITY_MS or DEFAULT_BRAIN_INACTIVITY_MS. */
+  brainInactivityMs?: number;
   /** Override the brain_liveness_heartbeat cadence. Production uses the
    *  module default; tests can shorten it to prove timer progress while the
    *  bridge drains large stdout bursts. */

@@ -716,6 +716,142 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
     expect(perm["runtime.dispatch_ready_task"]).toBe("allow");
   });
 
+  test("active substrate progress keeps the brain alive past a short inactivity window", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    const { emitEvent } = await import("./events");
+    let killCount = 0;
+    const sentinel = {
+      kill: () => { killCount += 1; },
+      stdout: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+      stderr: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+      exited: new Promise<number>((resolve) => setTimeout(() => resolve(0), 900)),
+    };
+    const progressTimer = setInterval(() => {
+      emitEvent(db, {
+        kind: "knowledge_candidate",
+        substrate_origin: "opencode",
+        directive_id: directiveId,
+        task_id: taskId,
+        payload: { claim: "still making MCP progress" },
+        invoker: "claude_root",
+      });
+    }, 120);
+    const tmpConfigDir = mkdtempSync(join(tmpdir(), "acc2-active-watchdog-test-"));
+    try {
+      await spawnRealOpencode(
+        { prompt: "active watchdog probe", taskId, directiveId },
+        db,
+        {
+          spawnFn: (() => sentinel) as unknown as typeof Bun.spawn,
+          mcpServerUrl: "http://127.0.0.1:45678/mcp",
+          configDir: tmpConfigDir,
+          firstFrameThresholdMs: 200,
+          mcpHandshakeWindowMs: 200,
+          brainInactivityMs: 250,
+          timeoutMs: 2_000,
+        },
+      );
+      expect(killCount).toBe(0);
+      const stuck = db.query<{ c: number }, [string]>("SELECT COUNT(*) AS c FROM events WHERE kind = 'bridge_stuck' AND task_id = ?").get(taskId);
+      expect(stuck!.c).toBe(0);
+    } finally {
+      clearInterval(progressTimer);
+      try { rmSync(tmpConfigDir, { recursive: true, force: true }); } catch { /* swallow */ }
+    }
+  }, 10_000);
+
+  test("inactivity watchdog kills a brain that handshook and then goes silent", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    const { emitEvent } = await import("./events");
+    let resolveExit: ((code: number) => void) | null = null;
+    const exitedPromise = new Promise<number>((resolve) => { resolveExit = resolve; });
+    const sentinel = {
+      kill: () => { setTimeout(() => resolveExit?.(143), 1); },
+      stdout: { getReader: () => ({ read: async () => { await exitedPromise; return { done: true, value: undefined }; } }) },
+      stderr: { getReader: () => ({ read: async () => { await exitedPromise; return { done: true, value: undefined }; } }) },
+      exited: exitedPromise,
+    };
+    setTimeout(() => {
+      emitEvent(db, {
+        kind: "knowledge_candidate",
+        substrate_origin: "opencode",
+        directive_id: directiveId,
+        task_id: taskId,
+        payload: { claim: "initial MCP handshake" },
+        invoker: "claude_root",
+      });
+    }, 20);
+    const result = await spawnRealOpencode(
+      { prompt: "inactivity watchdog probe", taskId, directiveId },
+      db,
+      {
+        spawnFn: (() => sentinel) as unknown as typeof Bun.spawn,
+        mcpServerUrl: "http://127.0.0.1:1/mcp",
+        firstFrameThresholdMs: 500,
+        mcpHandshakeWindowMs: 10_000,
+        brainInactivityMs: 200,
+        timeoutMs: 10_000,
+      },
+    );
+    expect(result.ok).toBe(false);
+    const stuckRow = db.query("SELECT payload FROM events WHERE kind = 'bridge_stuck' ORDER BY ts DESC LIMIT 1").get() as { payload: string } | null;
+    expect(stuckRow).not.toBeNull();
+    const stuckPayload = JSON.parse(stuckRow!.payload) as Record<string, unknown>;
+    expect(stuckPayload.reason).toBe("inactivity_kill");
+    expect(stuckPayload.tier).toBe("inactivity");
+  }, 10_000);
+
+  test("absolute backstop kills a continuously active runaway brain", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    const { emitEvent } = await import("./events");
+    let resolveExit: ((code: number) => void) | null = null;
+    const exitedPromise = new Promise<number>((resolve) => { resolveExit = resolve; });
+    const sentinel = {
+      kill: () => { setTimeout(() => resolveExit?.(143), 1); },
+      stdout: { getReader: () => ({ read: async () => { await exitedPromise; return { done: true, value: undefined }; } }) },
+      stderr: { getReader: () => ({ read: async () => { await exitedPromise; return { done: true, value: undefined }; } }) },
+      exited: exitedPromise,
+    };
+    const progressTimer = setInterval(() => {
+      emitEvent(db, {
+        kind: "knowledge_candidate",
+        substrate_origin: "opencode",
+        directive_id: directiveId,
+        task_id: taskId,
+        payload: { claim: "runaway but active" },
+        invoker: "claude_root",
+      });
+    }, 80);
+    try {
+      const result = await spawnRealOpencode(
+        { prompt: "backstop watchdog probe", taskId, directiveId },
+        db,
+        {
+          spawnFn: (() => sentinel) as unknown as typeof Bun.spawn,
+          mcpServerUrl: "http://127.0.0.1:1/mcp",
+          firstFrameThresholdMs: 200,
+          mcpHandshakeWindowMs: 10_000,
+          brainInactivityMs: 1_000,
+          timeoutMs: 450,
+        },
+      );
+      expect(result.ok).toBe(false);
+      const stuckRow = db.query("SELECT payload FROM events WHERE kind = 'bridge_stuck' ORDER BY ts DESC LIMIT 1").get() as { payload: string } | null;
+      expect(stuckRow).not.toBeNull();
+      const stuckPayload = JSON.parse(stuckRow!.payload) as Record<string, unknown>;
+      expect(stuckPayload.reason).toBe("backstop_kill");
+      expect(stuckPayload.tier).toBe("absolute_backstop");
+    } finally {
+      clearInterval(progressTimer);
+    }
+  }, 10_000);
+
   test("first-frame watchdog fires bridge_stuck when subprocess emits zero frames within firstFrameThresholdMs", async () => {
     const db = openDb(":memory:");
     // Build a fake subprocess that stays alive (`exited` resolves only after
@@ -801,6 +937,7 @@ describe("bridge (real subprocess, opt-in via ACC2_BRIDGE_MODE=real)", () => {
     expect(failedPayload.no_frames_received).toBe(true);
     expect(failedPayload.first_frame_seen).toBe(false);
     expect(failedPayload.tier).toBe("first_frame");
+    expect(failedPayload.watchdog_kill_reason).toBeNull();
   }, 15_000);
 
   test("v2 MCP tool surface advertises every substrate.* and runtime.* tool the daemon exposes", () => {

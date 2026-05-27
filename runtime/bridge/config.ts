@@ -52,6 +52,13 @@ export const DEFAULT_OPENCODE_MODEL = "openai/gpt-5.5";
  *  still bounding runaway loops. Override via
  *  `ACC2_OPENCODE_TIMEOUT_MS` or `SpawnOpts.timeoutMs`. */
 export const DEFAULT_TIMEOUT_MS = 1500_000;
+
+/** Silence budget for brain MCP/substrate activity. A dispatch that emits no
+ *  brain-originated substrate events for this long is considered inactive and
+ *  gets SIGTERMed even if the absolute backstop has not elapsed. Continuous
+ *  progress keeps the dispatch alive until the absolute backstop. Override via
+ *  ACC2_BRAIN_INACTIVITY_MS or SpawnOpts.brainInactivityMs. */
+export const DEFAULT_BRAIN_INACTIVITY_MS = 300_000;
 /** Default MCP-handshake window — the time opencode has between connecting
  *  to v2's MCP server and invoking its first `substrate.*` / `runtime.*`
  *  tool. The pre-gpt-5 default was 30s, which was tight even for the 5.4-mini
