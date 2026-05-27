@@ -335,7 +335,12 @@ describe("startDaemon — boot + health + shutdown", () => {
     // a flaky failure that did not reflect a real daemon defect. Poll the
     // invariant with a bounded deadline instead: deterministic, and still
     // fails loudly if the daemon genuinely never releases the lock.
-    const deadline = Date.now() + 5000;
+    // Deadline is generous (30s) because under the full --parallel suite (6
+    // workers + a possibly-live host daemon) graceful teardown — drain SQL
+    // pool, release socket — can exceed a few seconds under contention; the
+    // 25ms poll exits the instant the socket is gone, so a fast teardown pays
+    // nothing. A short 5s deadline was the sole source of a whole-suite retry.
+    const deadline = Date.now() + 30000;
     while (existsSync(tmp.socketFile) && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 25));
     }
