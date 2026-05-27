@@ -1103,11 +1103,13 @@ export const decideDispatch = (db: Database, task: TaskNode): DispatchDecision =
   // selection (and learned/peer-accuracy posteriors) decide whether it wins.
   if (matchedInlinePatterns && matchedInlinePatterns.length > 0) feasibleRoutes.push("claude_inline");
   // Symmetric executor-selection (increment 2/2, amendment 0MD1R9T8): Claude
-  // Code is now a substrate-spawnable engine through runtime/bridge/claude.ts,
-  // so claude_agent is a co-equal feasible executor alongside opencode_brain. A
-  // live external Claude peer still contributes posterior evidence through
-  // peer_activity_view (and the executor_selection policy below), but it is no
-  // longer the feasibility gate for the executor lane.
+  // Code is a co-equal feasible executor alongside opencode_brain, reached by
+  // ENQUEUEING a claude_agent_job_requested event that a registered Claude peer
+  // drains over MCP (claimJob → completeJob → act_tuple_recorded) — the
+  // substrate never shells out to `claude`. A live external Claude peer
+  // contributes posterior evidence through peer_activity_view (and the
+  // executor_selection policy below), but the queue is always a valid target,
+  // so peer-liveness is no longer the feasibility gate for the executor lane.
   feasibleRoutes.push("claude_agent");
 
   // Route availability still fails closed (no recipe/no inline knowledge means

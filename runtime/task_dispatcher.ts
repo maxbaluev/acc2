@@ -549,7 +549,7 @@ export const dispatchReadyTask = async (
     // through the act envelope (completeJob → act_tuple_recorded). The
     // substrate never shells out to `claude`. (Increment 2's direct CC-bridge
     // spawn — amendment AW5AY83Z — was a protocol violation and is withdrawn;
-    // the dormant runtime/bridge/claude.ts spawn path stays unused by dispatch.)
+    // runtime/bridge/claude.ts was deleted, so no spawn path exists at all.)
     const job = requestJob(db, {
       directive_id: task.directive_id,
       task_id: task.id,
