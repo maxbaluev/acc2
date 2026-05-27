@@ -1,11 +1,25 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { closeDb, openDb } from "../substrate/db";
 import { runViews } from "../substrate/views";
-import { decideDispatch, extractSemanticDagSignals, decompositionValueFromSignals } from "./dispatch_decider";
+import { decideDispatch, extractSemanticDagSignals, decompositionValueFromSignals, selectExecutor } from "./dispatch_decider";
 import type { TaskNode } from "./task_topology";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
 import { goalShape } from "./goal_shape";
+import { insertArtifact } from "./artifact_store";
+import type { JsonValue, SandboxDecl } from "../substrate/types";
+
+const TEST_SANDBOX: SandboxDecl = {
+  runtime: "bun",
+  fs_read: ["**/*"],
+  fs_write: [],
+  net_allow: [],
+  proc_allow: [],
+  substrate_access: "none",
+  cpu_ms: 100,
+  wall_ms: 100,
+  memory_mb: 64,
+};
 
 afterAll(() => closeDb());
 beforeEach(() => closeDb());
@@ -245,7 +259,14 @@ describe("dispatch_decider", () => {
       goal: "fix doc typo",
       target_files: ["docs/README.md"],
     } as Partial<TaskNode>));
-    expect(decision.route).toBe("opencode_brain");
+    // The intent of this test: legacy `target_files` alone does NOT match the
+    // inline glob pattern (which keys on `target_resources`), so the inline
+    // lane is not feasible and never selected. Amendment 0MD1R9T8 made
+    // claude_agent a co-equal feasible executor (no live-peer gate), so the
+    // residual-scored selection may pick claude_agent over opencode_brain on
+    // their pre-existing base axis scores — both are valid brain executors. The
+    // load-bearing assertion is simply: not claude_inline.
+    expect(decision.route).not.toBe("claude_inline");
   });
 
   test("crisis-mode lowers the recipe threshold so a mid-confidence recipe still routes", () => {
@@ -410,7 +431,12 @@ describe("dispatch_decider", () => {
     expect(decision.route).toBe("opencode_brain");
     expect(decision.route_scores.opencode_brain).toBeGreaterThan(decision.route_scores.claude_inline);
     expect(decision.verifier_evidence.selected_route_score).toBe(decision.route_scores.opencode_brain);
-    expect(decision.verifier_evidence.feasible_route_count).toBe(2);
+    // Amendment 0MD1R9T8 (increment 2/2): claude_agent is now a CO-EQUAL
+    // feasible executor lane (substrate-spawnable via runtime/bridge/claude.ts),
+    // no longer gated on a live external peer. Feasible routes here are
+    // opencode_brain + claude_inline (matched glob) + claude_agent = 3. This
+    // design leaf is not an apply leaf, so opencode_brain still wins.
+    expect(decision.verifier_evidence.feasible_route_count).toBe(3);
   });
 
   describe("semantic DAG signals", () => {
@@ -658,5 +684,116 @@ describe("dispatch_decider — no stale lanes (amendment XN9P09R6)", () => {
     expect(decision.route_scores.substrate_replay).toBeGreaterThanOrEqual(0);
     expect(decision.route).toBe("substrate_replay");
     expect(decision.reason).not.toContain("hard_task");
+  });
+});
+
+describe("dispatch_decider executor-selection (increment 2/2 CC bridge)", () => {
+  // Seed a task_node_opened so selectExecutor's ledger fallback can read the
+  // structural implementation-leaf markers (the thin scheduler TaskNode carries
+  // only id/goal/status).
+  const seedTaskNode = (
+    db: ReturnType<typeof openDb>,
+    taskId: string,
+    directiveId: string,
+    payload: Record<string, unknown>,
+  ) =>
+    emitEvent(db, {
+      kind: "task_node_opened",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      payload: { goal: "leaf", ...payload } as JsonValue,
+    });
+
+  test("deterministic fallback: design/research leaf prefers opencode (no scored policy)", () => {
+    const db = openDb(":memory:");
+    const task = sampleTask({ id: "t_design", directive_id: "d_design", goal: "design and research the architecture" });
+    seedTaskNode(db, "t_design", "d_design", { goal: task.goal });
+    const sel = selectExecutor(db, task, goalShape(task.goal));
+    expect(sel.preferred_route).toBe("opencode_brain");
+    expect(sel.decision_policy_artifact_id).toBeNull();
+    expect(sel.reason).toBe("deterministic_default_to_opencode_brain");
+  });
+
+  test("deterministic fallback: implementation/apply leaf prefers claude_agent (no scored policy)", () => {
+    const db = openDb(":memory:");
+    const task = sampleTask({ id: "t_impl", directive_id: "d_impl", goal: "apply the amendment" });
+    // source_proposal_id + requires_deliverable are the contract-amendment
+    // apply-leaf markers; executor selection routes them to claude_agent.
+    seedTaskNode(db, "t_impl", "d_impl", {
+      goal: task.goal,
+      source_proposal_id: "prop_abc",
+      requires_deliverable: true,
+      executor_hint: "claude_agent",
+      target_files: ["runtime/foo.ts"],
+    });
+    const sel = selectExecutor(db, task, goalShape(task.goal));
+    expect(sel.preferred_route).toBe("claude_agent");
+    expect(sel.decision_policy_artifact_id).toBeNull();
+    expect(sel.reason).toBe("deterministic_implementation_leaf_to_claude_agent");
+    expect(sel.weight).toBeGreaterThan(0);
+  });
+
+  test("scored policy wins: an admitted executor_selection policy overrides the structural default", () => {
+    const db = openDb(":memory:");
+    const goal = "design the runtime";
+    const shape = goalShape(goal);
+    // Admit a scored_decision_policy_v1 row that declares executor=claude_agent
+    // for this goal_shape. The retriever reads body via LIKE on decision_kind +
+    // goal_shape; the POLICY literal carries the params.
+    insertArtifact(db, {
+      runtime: "bun",
+      body: [
+        "// scored_decision_policy_v1",
+        `// decision_kind: executor_selection`,
+        `// goal_shape_key: ${shape}`,
+        `const POLICY = { decision_kind: "executor_selection", goal_shape_key: "${shape}", policy_params: { executor: "claude_agent", confidence: 0.9 } };`,
+        "console.log(POLICY);",
+      ].join("\n"),
+      declaredSandbox: TEST_SANDBOX,
+      stateRoot: null,
+      posteriorAlpha: 8,
+      posteriorBeta: 1,
+      score: 0.85,
+      confidence: 0.8,
+      recentResidualMean: 0,
+      recentKillCount: 0,
+      status: "promoted",
+      name: "executor_selection_policy_v1",
+      fixtureInput: null,
+      fixtureExpectedResidual: 0,
+      intent: null,
+      summary: null,
+      targetFiles: null,
+      kind: "scored_decision_policy_v1",
+    } as never);
+    runViews(db);
+    // A design leaf (would default to opencode) — the scored policy flips it.
+    const task = sampleTask({ id: "t_pol", directive_id: "d_pol", goal });
+    seedTaskNode(db, "t_pol", "d_pol", { goal });
+    const sel = selectExecutor(db, task, shape);
+    expect(sel.preferred_route).toBe("claude_agent");
+    expect(sel.decision_policy_artifact_id).not.toBeNull();
+    expect(sel.reason).toBe("scored_executor_selection_policy");
+    expect(sel.weight).toBeCloseTo(0.9, 1);
+  });
+
+  test("claude_agent route is co-equally feasible and wins for an implementation leaf via the delta", () => {
+    const db = openDb(":memory:");
+    const task = sampleTask({ id: "t_win", directive_id: "d_win", goal: "apply edits to runtime" });
+    seedTaskNode(db, "t_win", "d_win", {
+      goal: task.goal,
+      executor_hint: "claude_agent",
+      requires_deliverable: true,
+      target_files: ["runtime/x.ts"],
+    });
+    const decision = decideDispatch(db, task);
+    expect(decision.route).toBe("claude_agent");
+    if (decision.route === "claude_agent") {
+      expect(decision.reason).toContain("executor_selection");
+      expect((decision.acceptance_predicate as Record<string, unknown>).executor).toBe("claude_agent");
+    }
+    // The executor-selection evidence is surfaced for downstream credit.
+    expect(decision.verifier_evidence.executor_selection_weight).toBeGreaterThan(0);
   });
 });
