@@ -17,6 +17,12 @@ import {
   resetReadiness,
   setOnReady,
   stuckWorkers,
+  recordReadAttemptStart,
+  recordReadSuccess,
+  recordReadFailure,
+  readPathStatus,
+  READ_PATH_STALE_MS,
+  READ_PATH_LATENCY_MS,
 } from "./readiness";
 
 describe("readiness — stuckWorkers detection", () => {
@@ -115,68 +121,95 @@ describe("readiness — Tier D D1 in-flight stuck detection", () => {
   });
 });
 
-// LIVENESS (472WP33K / Z57SKME7): the /ready gate and /health status now
-// fail closed when a worker tick is wedged in-flight, so the autonomous
-// loop self-protects instead of feeding a wedged daemon. The HTTP routes
-// live in runtime/daemon.ts; here we prove the exact gating predicate they
-// compose — `isReady() && inFlightStuckWorkers().length === 0` for /ready,
-// and the degraded predicate for /health — directly against the in-memory
-// state machine, including the critical liveness≠slowness property.
-describe("readiness — in-flight stuck worker gates /ready and /health", () => {
+describe("readiness — READ-PATH starvation probe", () => {
   beforeEach(() => { resetReadiness(); });
   afterEach(() => { resetReadiness(); });
 
-  // mirrors daemon.ts /ready and /health status computation
-  const readyGate = (now: number): boolean =>
-    isReady() && inFlightStuckWorkers(60_000, now).length === 0;
-  const healthStatus = (now: number): "ok" | "degraded" =>
-    stuckWorkers(now).length === 0 && inFlightStuckWorkers(60_000, now).length === 0
-      ? "ok"
-      : "degraded";
-
-  test("ready when all workers are ready and none wedged in-flight", () => {
-    const now = Date.now();
-    registerWorker("extractors", 30_000);
-    markWorkerReady("extractors");
-    recordWorkerTickStart("extractors", now - 5_000); // 5s tick — healthy
-    expect(readyGate(now)).toBe(true);
-    expect(healthStatus(now)).toBe("ok");
+  test("quiet daemon with no read attempts is NOT starved", () => {
+    expect(readPathStatus().starved).toBe(false);
+    expect(readPathStatus().reason).toBeNull();
   });
 
-  test("NOT ready (503) and degraded when a worker tick is wedged in-flight", () => {
-    const now = Date.now();
-    registerWorker("extractors", 30_000);
-    markWorkerReady("extractors");
-    // A worker tick (e.g. the pre-fix unbounded closure-credit scan) that
-    // started 90s ago and never completed — the event-loop wedge signal.
-    recordWorkerTickStart("extractors", now - 90_000);
-    expect(isReady()).toBe(true);             // startup completed…
-    expect(readyGate(now)).toBe(false);       // …but /ready still fails closed
-    expect(inFlightStuckWorkers(60_000, now).map((s) => s.worker)).toContain("extractors");
-    expect(healthStatus(now)).toBe("degraded");
+  test("a healthy completed read keeps the read path not-starved", () => {
+    recordReadAttemptStart();
+    recordReadSuccess(5);
+    const s = readPathStatus();
+    expect(s.starved).toBe(false);
+    expect(s.last_latency_ms).toBe(5);
+    expect(s.in_flight_ms).toBeNull();
   });
 
-  test("liveness ≠ slowness: a long-running brain dispatch is NOT a supervised tick and never trips the gate", () => {
+  test("a read in flight longer than the latency ceiling is starved (meltdown shape)", () => {
     const now = Date.now();
-    registerWorker("extractors", 30_000);
-    markWorkerReady("extractors");
-    // Brain dispatches run through the bridge / task_dispatcher, NOT through
-    // supervisedTick, so they never call recordWorkerTickStart and never
-    // appear in state.tickStartedMs. Even a brain cycle running for 10
-    // minutes leaves the in-flight stuck set empty → daemon stays ready.
-    expect(inFlightStuckWorkers(60_000, now + 600_000)).toEqual([]);
-    expect(readyGate(now)).toBe(true);
-    expect(healthStatus(now)).toBe("ok");
+    recordReadAttemptStart(now - (READ_PATH_LATENCY_MS + 5_000));
+    // No success recorded — the view is hanging, exactly like the 10s
+    // aux-read timeout during the hot-ledger meltdown.
+    const s = readPathStatus(now);
+    expect(s.starved).toBe(true);
+    expect(s.reason).toBe("in_flight_exceeds_latency");
+    expect(s.in_flight_ms).toBeGreaterThanOrEqual(READ_PATH_LATENCY_MS);
   });
 
-  test("recovery: ready/ok again once the wedged tick completes", () => {
+  test("reads attempted but no success within the staleness window is starved", () => {
     const now = Date.now();
-    registerWorker("extractors", 30_000);
-    markWorkerReady("extractors");
-    recordWorkerTickStart("extractors", now - 90_000);
-    expect(readyGate(now)).toBe(false);
-    recordWorkerTick("extractors", now); // tick finally completes
-    expect(readyGate(now)).toBe(true);
-    expect(healthStatus(now)).toBe("ok");
+    // Attempt was recent (within stale window) but the read failed/never
+    // succeeded, draining the in-flight slot without a success stamp.
+    recordReadAttemptStart(now - 1_000);
+    recordReadFailure(now - 1_000);
+    const s = readPathStatus(now);
+    expect(s.starved).toBe(true);
+    expect(s.reason).toBe("no_success_since_attempt");
+  });
+
+  test("a stale prior success with a fresh attempt and no new success is starved", () => {
+    const now = Date.now();
+    recordReadAttemptStart(now - (READ_PATH_STALE_MS + 60_000));
+    recordReadSuccess(5, now - (READ_PATH_STALE_MS + 60_000)); // old success
+    // New attempt arrives but does not complete (in flight, but not yet past
+    // the latency ceiling) — the prior success is stale.
+    recordReadAttemptStart(now - 1_000);
+    const s = readPathStatus(now);
+    expect(s.starved).toBe(true);
+    expect(s.reason).toBe("no_success_since_attempt");
+  });
+
+  test("last completed read slower than the ceiling is starved", () => {
+    recordReadAttemptStart();
+    recordReadSuccess(READ_PATH_LATENCY_MS + 1_000);
+    const s = readPathStatus();
+    expect(s.starved).toBe(true);
+    expect(s.reason).toBe("last_latency_exceeds");
+  });
+
+  test("concurrent reads: in-flight clears only when the LAST one drains", () => {
+    const now = Date.now();
+    recordReadAttemptStart(now - 2_000);
+    recordReadAttemptStart(now - 1_000);
+    recordReadSuccess(5, now); // one drains
+    expect(readPathStatus(now).in_flight_ms).not.toBeNull(); // still one in flight
+    recordReadSuccess(5, now); // last drains
+    expect(readPathStatus(now).in_flight_ms).toBeNull();
+  });
+
+  test("isReady() fails closed when the read path is starved even with all workers ready", () => {
+    registerWorker("amendment", 1000);
+    markWorkerReady("amendment");
+    // Workers all ticking → worker gate is satisfied.
+    expect(isReady()).toBe(true);
+    // Now starve the read path: a read hung past the latency ceiling.
+    recordReadAttemptStart(Date.now() - (READ_PATH_LATENCY_MS + 5_000));
+    expect(isReady()).toBe(false);
+    // Drain it with a healthy success → /ready recovers.
+    recordReadSuccess(5);
+    expect(isReady()).toBe(true);
+  });
+
+  test("read-path gate is ADDITIVE — a starved read path never makes a worker-pending daemon ready", () => {
+    registerWorker("amendment", 1000);
+    // Worker NOT marked ready → worker gate refuses regardless of read path.
+    expect(isReady()).toBe(false);
+    recordReadAttemptStart();
+    recordReadSuccess(5); // healthy read path
+    expect(isReady()).toBe(false); // still refused: worker gate unsatisfied
   });
 });

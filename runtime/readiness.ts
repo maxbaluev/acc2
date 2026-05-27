@@ -50,7 +50,38 @@ export type ReadinessState = {
    *  a fault. The shared reactive safety net is the only true deadline
    *  (and it covers them collectively rather than per-worker). */
   reactive: Set<string>;
+  /** READ-PATH liveness probe (amendment: aux-read starvation).
+   *  The aux read server (Bun.serve on auxPort serving substrate.read views
+   *  at /read) can be FULLY starved — every view timing out — while the
+   *  worker loop ticks fine and /health reports ok. The worker-tick gate has
+   *  no signal for this. These fields are mutated on the EXISTING /read path
+   *  (no extra ledger scan, no heavy periodic query) so read-path health is
+   *  observable from cached state alone:
+   *   - readLastOkMs:        ms-epoch of the last read that completed OK.
+   *   - readLastLatencyMs:   wall latency of that last successful read.
+   *   - readLastAttemptMs:   ms-epoch a read was most recently STARTED.
+   *   - readInFlightStartMs: ms-epoch the OLDEST currently-in-flight read
+   *                          began, or null when no read is in flight. A
+   *                          read in flight longer than the threshold IS the
+   *                          starvation signal the worker gate cannot see. */
+  readLastOkMs: number | null;
+  readLastLatencyMs: number | null;
+  readLastAttemptMs: number | null;
+  readInFlightStartMs: number | null;
+  /** Count of reads currently in flight — readInFlightStartMs tracks the
+   *  oldest; this lets concurrent reads clear the in-flight marker only when
+   *  the last one drains. */
+  readInFlightCount: number;
 };
+
+/** Default staleness window: if reads are being ATTEMPTED but none has
+ *  succeeded within this many ms, the read path is starved. */
+export const READ_PATH_STALE_MS = 15_000;
+/** Default latency ceiling: if the last successful read took longer than
+ *  this, OR a read has been in flight longer than this, the path is
+ *  starved. Matches the 10s aux-read client timeout that fired during the
+ *  hot-ledger meltdown. */
+export const READ_PATH_LATENCY_MS = 10_000;
 
 const createState = (): ReadinessState => ({
   registered: new Set(),
@@ -61,6 +92,11 @@ const createState = (): ReadinessState => ({
   tickStartedMs: new Map(),
   tickIntervalMs: new Map(),
   reactive: new Set(),
+  readLastOkMs: null,
+  readLastLatencyMs: null,
+  readLastAttemptMs: null,
+  readInFlightStartMs: null,
+  readInFlightCount: 0,
 });
 
 let state: ReadinessState = createState();
@@ -144,6 +180,119 @@ export const inFlightStuckWorkers = (
   return out.sort((a, b) => b.in_flight_ms - a.in_flight_ms);
 };
 
+/** READ-PATH probe — call when a /read (or any aux read view) request
+ *  BEGINS. Stamps the attempt timestamp and increments the in-flight count;
+ *  the oldest in-flight start is what readPathStatus() measures against the
+ *  latency ceiling. Cheap O(1) state mutation — no ledger touch. */
+export const recordReadAttemptStart = (atMs: number = Date.now()): void => {
+  state.readLastAttemptMs = atMs;
+  if (state.readInFlightCount === 0) state.readInFlightStartMs = atMs;
+  state.readInFlightCount += 1;
+};
+
+/** READ-PATH probe — call when a read request COMPLETED SUCCESSFULLY.
+ *  Records the success timestamp + observed latency and drains one in-flight
+ *  slot. When the last in-flight read drains, clears the in-flight start. */
+export const recordReadSuccess = (latencyMs: number, atMs: number = Date.now()): void => {
+  state.readLastOkMs = atMs;
+  state.readLastLatencyMs = latencyMs;
+  if (state.readInFlightCount > 0) state.readInFlightCount -= 1;
+  if (state.readInFlightCount === 0) state.readInFlightStartMs = null;
+};
+
+/** READ-PATH probe — call when a read request FAILED or returned an error.
+ *  Drains one in-flight slot WITHOUT recording success, so a failed read is
+ *  neither counted as healthy nor left dangling in-flight. The starvation
+ *  signal (no success within the window) still fires from the unchanged
+ *  readLastOkMs. */
+export const recordReadFailure = (atMs: number = Date.now()): void => {
+  if (state.readInFlightCount > 0) state.readInFlightCount -= 1;
+  if (state.readInFlightCount === 0) state.readInFlightStartMs = null;
+};
+
+export type ReadPathStatus = {
+  /** True when the aux read path is starved — reported as degraded on
+   *  /health and forces /ready to fail closed. */
+  starved: boolean;
+  /** Why it is starved (null when healthy). One of:
+   *   "in_flight_exceeds_latency" — a read has been in flight past the
+   *      latency ceiling (the meltdown shape: every view hanging at 10s);
+   *   "no_success_since_attempt"  — reads are being attempted but none has
+   *      succeeded within the staleness window;
+   *   "last_latency_exceeds"      — the last completed read was slower than
+   *      the latency ceiling. */
+  reason: "in_flight_exceeds_latency" | "no_success_since_attempt" | "last_latency_exceeds" | null;
+  last_ok_ms_ago: number | null;
+  last_latency_ms: number | null;
+  in_flight_ms: number | null;
+};
+
+/** READ-PATH liveness verdict from CACHED probe state only (no query).
+ *  Starved when ANY of:
+ *   1. A read has been in flight longer than `latencyMs` (a hung view — the
+ *      exact meltdown shape where every read timed out at 10s while the
+ *      worker loop looked fine).
+ *   2. Reads have been ATTEMPTED but none succeeded within `staleMs` (the
+ *      attempt is recent but no success followed — starvation under load).
+ *   3. The last COMPLETED read exceeded `latencyMs` (degrading, not yet hung).
+ *  A daemon with zero read attempts since boot is NOT starved (no traffic is
+ *  not a fault) — the gate only fires once reads are actually being driven. */
+export const readPathStatus = (
+  nowMs: number = Date.now(),
+  staleMs: number = READ_PATH_STALE_MS,
+  latencyMs: number = READ_PATH_LATENCY_MS,
+): ReadPathStatus => {
+  const lastOkAgo = state.readLastOkMs === null ? null : nowMs - state.readLastOkMs;
+  const inFlight = state.readInFlightStartMs === null ? null : nowMs - state.readInFlightStartMs;
+
+  // 1. Hung in-flight read past the latency ceiling.
+  if (inFlight !== null && inFlight > latencyMs) {
+    return {
+      starved: true,
+      reason: "in_flight_exceeds_latency",
+      last_ok_ms_ago: lastOkAgo,
+      last_latency_ms: state.readLastLatencyMs,
+      in_flight_ms: inFlight,
+    };
+  }
+  // 2. Reads attempted recently but no success within the staleness window.
+  //    Only fires once a read has actually been attempted (readLastAttemptMs
+  //    set) — a quiet daemon with no read traffic is healthy.
+  if (state.readLastAttemptMs !== null) {
+    const noSuccessYet = state.readLastOkMs === null;
+    const staleSuccess = lastOkAgo !== null && lastOkAgo > staleMs;
+    const attemptRecent = nowMs - state.readLastAttemptMs <= staleMs;
+    // Starved only when an attempt is in flight or recent AND no fresh
+    // success backs it. A recent successful read clears this branch.
+    if ((noSuccessYet || staleSuccess) && (attemptRecent || inFlight !== null)) {
+      return {
+        starved: true,
+        reason: "no_success_since_attempt",
+        last_ok_ms_ago: lastOkAgo,
+        last_latency_ms: state.readLastLatencyMs,
+        in_flight_ms: inFlight,
+      };
+    }
+  }
+  // 3. Last completed read was slower than the ceiling.
+  if (state.readLastLatencyMs !== null && state.readLastLatencyMs > latencyMs) {
+    return {
+      starved: true,
+      reason: "last_latency_exceeds",
+      last_ok_ms_ago: lastOkAgo,
+      last_latency_ms: state.readLastLatencyMs,
+      in_flight_ms: inFlight,
+    };
+  }
+  return {
+    starved: false,
+    reason: null,
+    last_ok_ms_ago: lastOkAgo,
+    last_latency_ms: state.readLastLatencyMs,
+    in_flight_ms: inFlight,
+  };
+};
+
 /** Return any registered worker that has not ticked within 3× its declared
  *  interval. Workers without a declared interval (e.g. one-shot integrity
  *  check) are skipped. Returned `last_tick_ms_ago` is `null` for workers
@@ -199,14 +348,22 @@ export const markWorkerReady = (name: string): void => {
   }
 };
 
-/** True when every registered worker has marked itself ready. */
+/** True when every registered worker has marked itself ready AND the aux
+ *  read path is not starved. The read-path dimension is ADDITIVE: it never
+ *  relaxes the worker-tick gate — /ready requires BOTH. A starved read path
+ *  (aux reads hanging while workers tick fine — the hot-ledger meltdown
+ *  shape) forces /ready to fail closed (503) so load-balancers stop routing
+ *  to a daemon whose reads are dead. */
 export const isReady = (): boolean => {
   if (state.registered.size === 0) {
     // No workers registered yet → not ready. The daemon registers at
     // boot before any /ready probe can arrive.
     return false;
   }
-  return state.ready.size === state.registered.size;
+  if (state.ready.size !== state.registered.size) return false;
+  // ADDITIVE read-path gate — preserves the worker-tick gate above exactly.
+  if (readPathStatus().starved) return false;
+  return true;
 };
 
 /** Names of registered workers that have NOT yet marked themselves
