@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { closeDb, openDb } from "../substrate/db";
 import { startDaemon, stopDaemon, isDaemonAlreadyRunningError, getBootIntegrityState, runBudgetedSweep, type DaemonHandle, type BudgetedStep } from "./daemon";
 import { handleGetEvent, handleRead } from "./mcp_server/substrate_tools";
+import { recordReadAttemptStart, recordReadSuccess, READ_PATH_LATENCY_MS } from "./readiness";
 import { handleRecentEvents } from "./mcp_server/runtime_tools";
 import { isSchedulerDraining } from "./task_scheduler";
 import { getSqlPool, clearSqlPool } from "./sql_pool_singleton";
@@ -231,6 +232,43 @@ describe("startDaemon — boot + health + shutdown", () => {
       closeDb();
       rmSync(fresh.dir, { recursive: true, force: true });
     }
+  });
+
+  test("a starved read path makes /health report read_path starved while stuck_workers stays empty", async () => {
+    handle = await bootHandle(tmp);
+
+    // Healthy baseline: a freshly-booted daemon with no read traffic is NOT
+    // starved (no-traffic is not a fault) and has no stuck workers.
+    {
+      const res = await fetch(`http://127.0.0.1:${handle.auxPort}/health`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>;
+      const readPath = body.read_path as { starved?: boolean } | undefined;
+      expect(readPath?.starved).toBe(false);
+      expect(body.stuck_workers).toEqual([]);
+    }
+
+    // Drive the read-path probe directly into a starved state: a completed
+    // read whose latency exceeds the ceiling (reason: last_latency_exceeds).
+    // This is the read-path dimension being ORTHOGONAL to worker liveness —
+    // the workers are all ticking, yet the aux /read path is degraded.
+    recordReadAttemptStart();
+    recordReadSuccess(READ_PATH_LATENCY_MS + 5_000);
+
+    const res = await fetch(`http://127.0.0.1:${handle.auxPort}/health`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    const readPath = body.read_path as { starved?: boolean; reason?: string } | undefined;
+    expect(readPath?.starved).toBe(true);
+    expect(readPath?.reason).toBe("last_latency_exceeds");
+    // The starvation is read-path-only: no worker is stuck.
+    expect(body.stuck_workers).toEqual([]);
+
+    // Clear the process-global probe state so this synthetic starvation does
+    // not leak into sibling tests (e.g. the /ready gate, which fails closed on
+    // readPathStatus().starved): a fast completed read resets the verdict.
+    recordReadAttemptStart();
+    recordReadSuccess(1);
   });
 
   test("stopDaemon emits daemon_shutdown, removes the lockfile, closes both ports", async () => {

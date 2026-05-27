@@ -95,6 +95,10 @@ import {
   clearWorkerTickInFlight,
   stuckWorkers,
   inFlightStuckWorkers,
+  recordReadAttemptStart,
+  recordReadSuccess,
+  recordReadFailure,
+  readPathStatus,
 } from "./readiness";
 import { SqlWorkerPool, resolveSqlPoolConfigFromEnv } from "./sql_worker_pool";
 import { setSqlPool, clearSqlPool } from "./sql_pool_singleton";
@@ -3724,8 +3728,20 @@ const routeAuxRead = async (
   if (!parsed.success) {
     return Response.json({ ok: false, error: "invalid_params" }, { status: 400 });
   }
-  const result = await route.handler(ctx, parsed.data);
-  return Response.json(result, { status: result.ok ? 200 : 400 });
+  // Feed the read-path liveness probe (readiness.ts): mark an attempt in
+  // flight, record latency on success, and record a failure if the handler
+  // throws. This is what makes readPathStatus()/the /ready starvation gate
+  // non-inert — without these calls the probe sees zero traffic forever.
+  recordReadAttemptStart();
+  const readStartedAt = Date.now();
+  try {
+    const result = await route.handler(ctx, parsed.data);
+    recordReadSuccess(Date.now() - readStartedAt);
+    return Response.json(result, { status: result.ok ? 200 : 400 });
+  } catch (err) {
+    recordReadFailure();
+    throw err;
+  }
 };
 
 const routeAux = async (
@@ -3900,6 +3916,11 @@ const routeAux = async (
       mcp_sessions: mcpSessionStats(mcpServer, mcpSessionReaper),
       stuck_workers: stuck,
       in_flight_stuck_workers: inFlightStuck,
+      // Read-path liveness (readiness.ts): the aux /read path can be fully
+      // starved (every view timing out) while workers still tick — an
+      // orthogonal dimension to stuck_workers. Surfaced here so operators see
+      // read starvation directly; /ready already gates on readPathStatus().starved.
+      read_path: readPathStatus(),
       hotreload: hotreloadState,
       activation_listener_count: activationListenerCount,
       pathology_budget_exhausted_recent_count: counts.pathology_exhausted,
