@@ -94,6 +94,10 @@ import {
   clearWorkerTickInFlight,
   stuckWorkers,
   inFlightStuckWorkers,
+  recordReadAttemptStart,
+  recordReadSuccess,
+  recordReadFailure,
+  readPathStatus,
 } from "./readiness";
 import { SqlWorkerPool, resolveSqlPoolConfigFromEnv } from "./sql_worker_pool";
 import { setSqlPool, clearSqlPool } from "./sql_pool_singleton";
@@ -3540,7 +3544,26 @@ const routeAuxRead = async (
   if (!parsed.success) {
     return Response.json({ ok: false, error: "invalid_params" }, { status: 400 });
   }
-  const result = await route.handler(ctx, parsed.data);
+  // READ-PATH liveness probe (amendment: aux-read starvation). Mark the
+  // read started, time the handler, then record success/failure. This is the
+  // EXISTING path — no extra ledger scan, no periodic query. The cached
+  // probe state feeds /health (degraded) and /ready (fail-closed 503), giving
+  // the worker-tick gate the read-path dimension it lacked during the
+  // hot-ledger meltdown (every view timed out at 10s while /health=ok).
+  const readStartMs = Date.now();
+  recordReadAttemptStart(readStartMs);
+  let result: McpResult;
+  try {
+    result = await route.handler(ctx, parsed.data);
+  } catch (err) {
+    recordReadFailure();
+    throw err;
+  }
+  if (result.ok) {
+    recordReadSuccess(Date.now() - readStartMs);
+  } else {
+    recordReadFailure();
+  }
   return Response.json(result, { status: result.ok ? 200 : 400 });
 };
 
@@ -3575,6 +3598,13 @@ const routeAux = async (
     // session. Surfaced in /health so a hung daemon is diagnosable in one
     // probe (the supervisor-scanning-325K-events case).
     const inFlightStuck = inFlightStuckWorkers();
+    // READ-PATH liveness (amendment: aux-read starvation). The worker-tick
+    // gate above CANNOT see a starved aux read server — during the hot-ledger
+    // meltdown every /read view timed out at 10s while workers ticked fine and
+    // /health stayed ok. This reads CACHED probe state stamped on the /read
+    // path (no query). status=ok requires BOTH worker-tick AND read-path
+    // health; a starved read path degrades /health independent of workers.
+    const readPath = readPathStatus();
     let hotreloadState: unknown = null;
     try {
       const mod = await import("./hotreload_worker");
@@ -3672,7 +3702,11 @@ const routeAux = async (
       handshakeGate = mod._handshakeGateStateForTests();
     } catch { /* bridge module may be unloadable in tests; tolerate */ }
     return Response.json({
-      status: stuck.length === 0 ? "ok" : "degraded",
+      // health=ok requires BOTH the worker-tick gate (no stuck workers) AND
+      // the read-path gate (aux reads not starved). Either dimension failing
+      // degrades the daemon — the worker gate is preserved exactly, the
+      // read-path gate is purely additive.
+      status: stuck.length === 0 && !readPath.starved ? "ok" : "degraded",
       pid: process.pid,
       uptime_ms: Date.now() - startedAtMs,
       db_path: stateDbPath,
@@ -3683,6 +3717,7 @@ const routeAux = async (
       mcp_sessions: mcpSessionStats(mcpServer, mcpSessionReaper),
       stuck_workers: stuck,
       in_flight_stuck_workers: inFlightStuck,
+      read_path: readPath,
       hotreload: hotreloadState,
       activation_listener_count: activationListenerCount,
       pathology_budget_exhausted_recent_count: counts.pathology_exhausted,
@@ -3715,12 +3750,16 @@ const routeAux = async (
         startup_duration_ms: readyAtMs ? readyAtMs - startedAtMs : null,
       });
     }
+    // /ready fails closed (503) when EITHER the worker-tick gate has pending
+    // workers OR the read path is starved (additive read-path dimension).
+    // Surface both so an operator/load-balancer sees which gate refused.
     return Response.json(
       {
         status: "not_ready",
         pid: process.pid,
         uptime_ms: Date.now() - startedAtMs,
         pending_workers: pendingWorkers(),
+        read_path: readPathStatus(),
       },
       { status: 503 },
     );

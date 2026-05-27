@@ -16,6 +16,11 @@ import { handleRecentEvents } from "./mcp_server/runtime_tools";
 import { isSchedulerDraining } from "./task_scheduler";
 import { getSqlPool, clearSqlPool } from "./sql_pool_singleton";
 import { getFreePortPair, startDaemonOnFreePorts } from "../tests/free_port";
+import {
+  recordReadAttemptStart,
+  recordReadSuccess,
+  READ_PATH_LATENCY_MS,
+} from "./readiness";
 
 // OS-assigned free ports (collision-free by construction). Earlier schemes
 // (random-in-band, then monotonic) still collided across parallel files /
@@ -321,6 +326,60 @@ describe("startDaemon — boot + health + shutdown", () => {
     expect(lastStatus).toBe(200);
     expect(lastBody!.status).toBe("ready");
     expect(typeof lastBody!.ready_at_ms).toBe("number");
+  });
+
+  test("starved read path degrades /health and forces /ready 503 even with all workers ticking", async () => {
+    handle = await bootHandle(tmp);
+    // Confirm baseline: workers are ticking, read path healthy → /ready 200,
+    // /health ok. (The read path is recorded by real /read traffic below.)
+    let readyStatus = 0;
+    for (let i = 0; i < 30; i++) {
+      const res = await fetch(`http://127.0.0.1:${handle.auxPort}/ready`);
+      readyStatus = res.status;
+      if (readyStatus === 200) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(readyStatus).toBe(200);
+
+    // Drive a real /read so a healthy success is on record, proving the
+    // happy-path stays ok before we inject starvation.
+    const okRead = await fetch(`http://127.0.0.1:${handle.auxPort}/read`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ view_name: "failure_view", args: {} }),
+    });
+    expect(okRead.status).toBe(200);
+    const healthyHealth = (await (await fetch(`http://127.0.0.1:${handle.auxPort}/health`)).json()) as Record<string, unknown>;
+    expect(healthyHealth.status).toBe("ok");
+    expect((healthyHealth.read_path as Record<string, unknown>).starved).toBe(false);
+
+    // Now STARVE the read path: mark a read started past the latency ceiling
+    // and never completed — the hot-ledger-meltdown shape (every /read view
+    // hanging at 10s) while the worker loop keeps ticking fine. The daemon
+    // shares this process-global readiness module, so the cached probe state
+    // is visible to the live /health + /ready handlers.
+    recordReadAttemptStart(Date.now() - (READ_PATH_LATENCY_MS + 5_000));
+
+    const degradedHealth = (await (await fetch(`http://127.0.0.1:${handle.auxPort}/health`)).json()) as Record<string, unknown>;
+    // Worker-tick gate still passes (no stuck workers) — proving the read-path
+    // dimension is what degraded it.
+    expect((degradedHealth.stuck_workers as unknown[]).length).toBe(0);
+    expect(degradedHealth.status).toBe("degraded");
+    expect((degradedHealth.read_path as Record<string, unknown>).starved).toBe(true);
+    expect((degradedHealth.read_path as Record<string, unknown>).reason).toBe("in_flight_exceeds_latency");
+
+    const notReady = await fetch(`http://127.0.0.1:${handle.auxPort}/ready`);
+    expect(notReady.status).toBe(503);
+    const notReadyBody = (await notReady.json()) as Record<string, unknown>;
+    expect(notReadyBody.status).toBe("not_ready");
+    expect((notReadyBody.read_path as Record<string, unknown>).starved).toBe(true);
+
+    // Recovery: a healthy read drains the in-flight slot → /health ok, /ready 200.
+    recordReadSuccess(5);
+    const recoveredHealth = (await (await fetch(`http://127.0.0.1:${handle.auxPort}/health`)).json()) as Record<string, unknown>;
+    expect(recoveredHealth.status).toBe("ok");
+    const recoveredReady = await fetch(`http://127.0.0.1:${handle.auxPort}/ready`);
+    expect(recoveredReady.status).toBe(200);
   });
 
   test("daemon_ready event is emitted exactly once after readiness flips", async () => {
