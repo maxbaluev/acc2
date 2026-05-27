@@ -56,7 +56,7 @@ import { invokeVerifierWithMeta } from "./verifier_invocation";
 import { opencodeQuery, type BridgeRequest, type BridgeResult } from "./bridge/index";
 import type { TaskNode } from "./task_topology";
 import { refinementDepth } from "./task_topology";
-import { getArtifact, applyResidualOutcome, recordArtifactKill, maybeRetire } from "./artifact_store";
+import { getArtifact, recordArtifactKill, maybeRetire } from "./artifact_store";
 import { runArtifactForRuntime, type UnifiedRuntimeInvocation, type UnifiedRuntimeObservation } from "./runtimes";
 import { nowIso } from "./ids";
 import { distributeCredit } from "./credit";
@@ -1430,10 +1430,8 @@ export const dispatchReadyTask = async (
           } catch (err) {
             logger.warn(
               { where: "task_dispatcher.credit.irreversible_consent_gate", task_id: task.id, err: (err as Error).message },
-              "distributeCredit failed (irreversible consent gate) — falling back to direct posterior",
+              "distributeCredit failed (irreversible consent gate); action_scored universal projection already owns posterior credit",
             );
-            applyResidualOutcome(db, actionArtifact.id, 1, nowIso());
-            applyResidualOutcome(db, verifierArtifact.id, 1, nowIso());
           }
           emitEvent(db, {
             kind: "brain_dispatch_closed",
@@ -1525,11 +1523,10 @@ export const dispatchReadyTask = async (
             dispatch_verifier_evidence: decision.verifier_evidence,
           } as JsonValue,
         });
-        // Route through the Phase H credit pipeline. When the observation
-        // event is missing (rare — runtime crash before any emit) we fall
-        // back to applyResidualOutcome directly so the artifact's posterior
-        // still moves; credit-pipeline gracefully handles the missing event
-        // (collectCitations skips a null event).
+        // Route through the Phase H credit pipeline. The action_scored
+        // post-write universal scoring projector already covers primary
+        // artifact posterior credit; this rich path adds citations and
+        // knowledge credit without owning a separate fallback scorer.
         try {
           await distributeCredit(db, {
             action_event_id: actionPredicted.id,
@@ -1541,9 +1538,8 @@ export const dispatchReadyTask = async (
         } catch (err) {
           logger.warn(
             { where: "task_dispatcher.credit.no_verifier", task_id: task.id, err: (err as Error).message },
-            "distributeCredit failed (no-verifier branch) — falling back to direct posterior",
+            "distributeCredit failed (no-verifier branch); action_scored universal projection already owns posterior credit",
           );
-          applyResidualOutcome(db, actionArtifact.id, 1, nowIso());
         }
       } else {
         // Run the verifier on the observation. F6 completion (decision 11):
@@ -1642,9 +1638,9 @@ export const dispatchReadyTask = async (
 
         // Phase H: credit pipeline distributes the residual across the
         // action + verifier + every cited knowledge/artifact via Shapley
-        // decomposition (§3.6.1 Rule 3). The pipeline calls
-        // applyResidualOutcome on the primary action + verifier; cited
-        // entities receive a weighted Beta posterior delta.
+        // decomposition (§3.6.1 Rule 3). Primary posterior movement is
+        // owned by the action_scored universal projector; the pipeline
+        // enriches citation/knowledge credit without a separate fallback.
         const obsRow = db
           .query(
             `SELECT id FROM events WHERE task_id = ? AND kind = 'artifact_observed'
@@ -1660,13 +1656,10 @@ export const dispatchReadyTask = async (
             observed_residual: residual,
           });
         } catch (err) {
-          // Fail-safe: keep posterior accounting honest even if credit fails.
           logger.warn(
             { where: "task_dispatcher.credit.verifier_branch", task_id: task.id, residual, err: (err as Error).message },
-            "distributeCredit failed (verifier branch) — falling back to direct posterior",
+            "distributeCredit failed (verifier branch); action_scored universal projection already owns posterior credit",
           );
-          applyResidualOutcome(db, actionArtifact.id, residual, nowIso());
-          applyResidualOutcome(db, verifierArtifact.id, residual, nowIso());
         }
 
         // 6a. PROPOSAL GROUNDING GATE — structural check before commit.

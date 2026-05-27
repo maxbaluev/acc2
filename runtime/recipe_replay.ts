@@ -35,7 +35,7 @@ import type { Database } from "bun:sqlite";
 import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
 import { goalShape } from "./goal_shape";
-import { getArtifact, applyResidualOutcome } from "./artifact_store";
+import { getArtifact } from "./artifact_store";
 import { applyScoredOutcome } from "./posterior";
 import { runArtifactForRuntime } from "./runtimes/index";
 import type { TaskNode } from "./task_topology";
@@ -685,10 +685,8 @@ export const replayRecipe = async (
         observed_residual: residual,
       });
     } catch {
-      applyResidualOutcome(db, actionStep.artifact_id, residual, nowIso());
-      if (actionStep.verifier_artifact_id) {
-        applyResidualOutcome(db, actionStep.verifier_artifact_id, residual, nowIso());
-      }
+      // action_scored universal projection already owns primary posterior
+      // credit; recipe replay must not retain a duplicate direct fallback.
     }
 
     // If THIS step's verifier residual exceeds the abort threshold, the

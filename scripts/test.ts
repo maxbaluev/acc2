@@ -77,11 +77,11 @@ const explicitFiles = forwarded.some((a) => /\.test\.ts$/.test(a));
 const tierFlag = forwarded.find((a) => a === "--all" || a === "--slow" || a === "--fast");
 if (tierFlag) forwarded.splice(forwarded.indexOf(tierFlag), 1);
 const effectiveTier = tierFlag === "--all" ? "all" : tierFlag === "--slow" ? "slow" : tierFlag === "--fast" ? "fast" : tier;
-const SLOW_TEST_RE = /(^|\/)(daemon|bridge|mcp|integration|real_|.*\.slow)\.test\.ts$|daemon_|_daemon|real-brain|real_bridge/i;
+const SLOW_TEST_RE = /(^|\/)(cli|tests|runtime\/fixtures)\/|(^|\/)(daemon|bridge|mcp|integration|real_|.*\.slow)\.test\.ts$|daemon_|_daemon|worker|external|research|hotreload|rpc|real-brain|real_bridge/i;
 const collectTestFiles = (dir = "."): string[] => {
   const out: string[] = [];
   for (const name of readdirSync(dir, { withFileTypes: true })) {
-    if (name.name === "node_modules" || name.name.startsWith(".worktree") || name.name === ".git") continue;
+    if (name.name === "node_modules" || name.name.startsWith(".")) continue;
     const rel = dir === "." ? name.name : dir + "/" + name.name;
     if (name.isDirectory()) out.push(...collectTestFiles(rel));
     else if (name.isFile() && rel.endsWith(".test.ts")) out.push(rel);

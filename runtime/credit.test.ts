@@ -30,7 +30,7 @@ import { decisionInfluencerScores } from "../substrate/views";
 import { getEventById } from "./events";
 import { Database as Sqlite } from "bun:sqlite";
 import type { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -2975,5 +2975,18 @@ describe("P4 decision-influencer scoring (amendment CWHVYFX9)", () => {
     expect(onlyAxis.every((r) => r.entity_kind === "dispatch_route_axis_factor")).toBe(true);
     expect(onlyAxis.length).toBeGreaterThanOrEqual(1);
     closeDb();
+  });
+});
+
+
+describe("U7 universal scoring spine source invariants", () => {
+  test("dispatcher and recipe replay do not retain direct posterior fallback scoring after action_scored", () => {
+    const dispatcher = readFileSync(join(import.meta.dir, "task_dispatcher.ts"), "utf8");
+    const recipeReplay = readFileSync(join(import.meta.dir, "recipe_replay.ts"), "utf8");
+
+    expect(dispatcher).not.toContain("falling back to direct posterior");
+    expect(recipeReplay).not.toContain("falling back to direct posterior");
+    expect(dispatcher).not.toMatch(/catch \(err\)[\s\S]{0,500}applyResidualOutcome\(db, (?:actionArtifact|verifierArtifact)\.id/);
+    expect(recipeReplay).not.toMatch(/catch \{[\s\S]{0,500}applyResidualOutcome\(db, actionStep\./);
   });
 });
