@@ -1388,6 +1388,7 @@ describe("extractors — off-loop read routing (poolQuery)", () => {
   test("extractActArtifactScores + extractRecipeCandidates route their heavy scans through the pool", async () => {
     const db = openDb(":memory:");
     insertArtifact(db, "art_offloop");
+    insertEvent(db, { kind: "action_scored", action_artifact_id: "art_offloop", residual: 0.1, payload: {} });
     insertEvent(db, { kind: "task_committed", directive_id: "d_recipe", payload: {} });
     const spy = makeSpyPool(db);
     setSqlPool(spy as never);
