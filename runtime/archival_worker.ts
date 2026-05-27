@@ -75,47 +75,64 @@ const VERIFY_SAMPLE = 100;
 //   - drop: pure noise (resolved transient errors); purge without archive.
 export type CurationMode = "always_keep" | "archive_cold" | "compress_summary" | "drop" | "evict";
 
+// PAYOFF amendment (bounded hot ledger): the high-volume credit/retrieval
+// citation-binding spine was REMOVED from ALWAYS_KEEP and now ages into the
+// cold archive under the existing pressure window. This is SAFE because the
+// prerequisite landed: runtime/credit.ts and runtime/dense_closure_credit.ts
+// are ARCHIVE-AWARE — every credit/retrieval read goes through
+// selectEventRowsAcrossTiers / firstEventRowAcrossTiers / eventExistsAcrossTiers,
+// which union the hot `events` table with every attached cold archive schema
+// (substrate/db.attachedArchiveSchemas). retrieval.ts resolves event rows
+// hot-first / cold-on-miss by id. So the citation-binding/credit spine still
+// resolves cited ids after they move to cold; only the bulk of the ledger
+// drains out of hot.
+//
+// REMOVED from ALWAYS_KEEP (now archive_cold — the credit spine, the bulk of
+// the ledger): candidate_confirmed, act_tuple_recorded, action_predicted,
+// action_scored, causal_edge_observed, causal_edge_credited,
+// retrieval_credit_attributed, knowledge_candidate, knowledge_promoted,
+// lesson_extracted, act_artifact_candidate, act_artifact_admitted,
+// act_artifact_promoted. Each is read by credit.ts / dense_closure_credit.ts /
+// retrieval.ts ONLY through the archive-union helpers or hot-first/cold-on-miss
+// by-id resolution (the few remaining raw `FROM events` reads in credit.ts are
+// recency/activity windows over OTHER kinds — brain_invocation_*,
+// task_node_opened, task_edge_recorded, prompt_policy_section_selected,
+// act_artifact_score_updated — none of the removed kinds). The remaining
+// knowledge_candidate/knowledge_promoted hot reads in retrieval.ts are
+// COUNT-by-group acceptance-rate aggregates, not citation-binding by-id
+// lookups, so aging old rows to cold does not break them.
+//
+// RETAINED (still ALWAYS_KEEP) — each line states the one-line invariant for
+// WHY it stays hot. These are deliberately the LOW-VOLUME / RARE kinds whose
+// readers scan the HOT events table directly (not via the archive union); per
+// the conservative rule, when uncertain we KEEP. The objective was to drain
+// the high-volume spine, NOT to empty the set.
 const ALWAYS_KEEP_KINDS = new Set<string>([
-  // Owner-channel evidence: rarest + highest value.
-  "owner_observed_outcome_recorded",
-  "owner_input_received",
-  "owner_input_required",
-  "owner_decision_recorded",
-  "owner_insight_candidate",
-  "owner_profile_recorded",
-  // Knowledge graph backbone.
-  "knowledge_promoted",
-  "contract_amendment_proposed",
-  "closure_blocked_high_residual",
-  "closure_override_acknowledged",
-  // Tier -1 floor violations (rare; load-bearing for audit).
-  "integrity_check_failed",
-  "memory_reconciliation_drift_detected",
-  "owner_identity_discontinuity",
-  // Constitutional events.
-  "constitutional_ratification_recorded",
-  "constitutional_ratification_refused",
-  // Causal spine + substrate memory: these compound and must remain hot.
-  "task_committed",
-  "task_closure_audited",
-  "act_tuple_recorded",
-  "action_predicted",
-  "action_scored",
-  "causal_edge_observed",
-  "causal_edge_credited",
-  "retrieval_credit_attributed",
-  // Credit/retrieval citation-binding spine: consumed by runtime/credit.ts
-  // (Beta-posterior credit per cited knowledge id) and
-  // runtime/dense_closure_credit.ts. Pressure-triggered curation compresses
-  // the archival window onto YOUNGER rows, so candidate_confirmed MUST be
-  // ALWAYS_KEEP — moving it to cold (even though recoverable) would pull the
-  // live credit spine out of the hot ledger. NON-prunable / NON-evicted.
-  "candidate_confirmed",
-  "knowledge_candidate",
-  "act_artifact_candidate",
-  "act_artifact_admitted",
-  "act_artifact_promoted",
-  "lesson_extracted",
+  // ── Owner-channel evidence: rarest + highest value; many hot scanners
+  //    (owner_outcome_channel, supervisor, prompt_composer, views) read these
+  //    as recent owner signal — keep hot so the owner model stays live. ──
+  "owner_observed_outcome_recorded", // owner verdict drives outcome credit; read hot by owner_outcome_channel + views.
+  "owner_input_received",            // owner-authored intent/consent; rare, load-bearing for ingress + audit.
+  "owner_input_required",            // open owner decision point; surfaced hot by dispatch/status views.
+  "owner_decision_recorded",         // owner resolution of a decision point; rare, must stay queryable hot.
+  "owner_insight_candidate",         // durable owner-language/profile signal; rare, feeds owner-profile reconciliation.
+  "owner_profile_recorded",          // owner profile vector; read hot by prompt_composer rendering — must not age out.
+  // ── Knowledge-graph governance backbone. ──
+  "contract_amendment_proposed",     // protocol/contract drift record; read hot by contract_amendment_consumer + governance; rare, load-bearing.
+  "closure_blocked_high_residual",   // closure-refusal audit trail; rare, scanned hot by closure governance.
+  "closure_override_acknowledged",   // explicit closure override; rare, must stay hot for audit.
+  // ── Tier -1 floor violations (rare; load-bearing for audit). ──
+  "integrity_check_failed",          // integrity floor violation; rare, scanned hot by integrity_worker + governance.
+  "memory_reconciliation_drift_detected", // memory-drift floor signal; rare, scanned hot by reconciliation governance.
+  "owner_identity_discontinuity",    // owner-identity floor violation; rare, scanned hot for security audit.
+  // ── Constitutional events (effectively never high-volume). ──
+  "constitutional_ratification_recorded", // constitutional ratification; rare/one-shot, must stay hot.
+  "constitutional_ratification_refused",  // constitutional refusal; rare/one-shot, must stay hot.
+  // ── Lifecycle anchors: low-volume terminal markers read directly from hot
+  //    by many schedulers/closure/governance scanners (task_committed alone
+  //    has 20+ hot readers); keep hot so lifecycle queries stay archive-free. ──
+  "task_committed",                  // terminal commit marker; scanned hot by scheduler/closure/dispatch — one per task, low-volume.
+  "task_closure_audited",            // root closure-audit terminal; scanned hot by closure/governance — one per root, low-volume.
 ]);
 
 const COMPRESS_SUMMARY_KINDS = new Set<string>([

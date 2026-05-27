@@ -170,6 +170,97 @@ describe("runArchivalSweep — basic monthly archival", () => {
   });
 });
 
+// ── PAYOFF amendment: high-volume credit/retrieval citation-binding spine
+// kinds were REMOVED from ALWAYS_KEEP and now age into cold under the existing
+// pressure window (credit.ts / dense_closure_credit.ts / retrieval.ts read them
+// archive-aware, so they are MOVED to cold, never LOST). The retained kinds
+// (owner-channel, governance, lifecycle anchors) stay always_keep. ──────────
+describe("ALWAYS_KEEP narrowing — credit spine ages to cold; retained kinds stay hot", () => {
+  let tmpDir: string;
+  let dbPath: string;
+  let db: Database;
+  const NOW = Date.parse("2026-05-15T12:00:00.000Z");
+
+  const seedKindAtTs = (kind: string, tsIso: string, idx: number): string => {
+    const ev = emitEvent(db, { kind: kind as Parameters<typeof emitEvent>[1]["kind"], payload: { idx } });
+    db.run("UPDATE events SET ts = ? WHERE id = ?", [tsIso, ev.id]);
+    return ev.id;
+  };
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "acc2-alwayskeep-"));
+    dbPath = join(tmpDir, "state.db");
+    db = openDb(dbPath);
+  });
+  afterEach(() => {
+    closeDb(dbPath);
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("curationModeForKind: removed credit-spine kinds are 'archive_cold', retained kinds are 'always_keep'", () => {
+    // Removed (now archive_cold — the high-volume credit/retrieval spine):
+    for (const k of [
+      "candidate_confirmed",
+      "act_tuple_recorded",
+      "action_predicted",
+      "action_scored",
+      "causal_edge_observed",
+      "causal_edge_credited",
+      "retrieval_credit_attributed",
+      "knowledge_candidate",
+      "knowledge_promoted",
+      "lesson_extracted",
+      "act_artifact_candidate",
+      "act_artifact_admitted",
+      "act_artifact_promoted",
+    ]) {
+      expect(curationModeForKind(k)).toBe("archive_cold");
+    }
+    // Retained (still always_keep — low-volume owner/governance/lifecycle):
+    for (const k of [
+      "owner_observed_outcome_recorded",
+      "owner_input_received",
+      "owner_profile_recorded",
+      "contract_amendment_proposed",
+      "closure_blocked_high_residual",
+      "integrity_check_failed",
+      "constitutional_ratification_recorded",
+      "task_committed",
+      "task_closure_audited",
+    ]) {
+      expect(curationModeForKind(k)).toBe("always_keep");
+    }
+  });
+
+  test("aged candidate_confirmed (credit spine) rows move to cold in a sweep; a retained task_committed row stays hot", async () => {
+    const oldTs = new Date(Date.parse("2026-02-10T00:00:00.000Z")).toISOString();
+    // 4 aged credit-spine rows (past 30-day retention) — now archivable.
+    for (let i = 0; i < 4; i++) seedKindAtTs("candidate_confirmed", oldTs, i);
+    // 1 aged retained lifecycle anchor — must NEVER leave hot.
+    seedKindAtTs("task_committed", oldTs, 99);
+
+    expect(eventsCount(db, "candidate_confirmed")).toBe(4);
+    expect(eventsCount(db, "task_committed")).toBe(1);
+
+    const summary = await runArchivalSweep(db, { stateDbPath: dbPath, nowMs: NOW, retentionDays: 30 });
+
+    // The credit-spine rows moved to cold (deleted from hot).
+    expect(summary.deleted).toBe(4);
+    expect(eventsCount(db, "candidate_confirmed")).toBe(0);
+    // Recoverable from the cold sibling — moved, not lost.
+    const archived = await searchAcrossArchives<{ id: string }>(
+      db,
+      dbPath,
+      "SELECT id FROM events WHERE kind = 'candidate_confirmed'",
+      [],
+      { hotOnlyCold: true },
+    );
+    expect(archived.length).toBe(4);
+    // Retained lifecycle anchor still hot (ALWAYS_KEEP excludes it from the scan).
+    expect(eventsCount(db, "task_committed")).toBe(1);
+  });
+});
+
 describe("runArchivalSweep — integrity failure rollback", () => {
   let tmpDir: string;
   let dbPath: string;
@@ -671,15 +762,16 @@ describe("evaluateLedgerCurationPressure — pressure-triggered retention", () =
     expect(pressured.archived_by_month["2026-05"]).toBeGreaterThan(0);
   });
 
-  test("SAFETY: candidate_confirmed and origin_calibration_recorded are NEVER lost under max pressure", async () => {
-    // Seed credit-spine + calibration rows 5 days ago (young, but pressure
-    // compresses the window to 2 days — so a naive policy could touch them).
+  test("PAYOFF: candidate_confirmed (credit spine) MOVES to cold under pressure (recoverable); origin_calibration_recorded stays put on the archival path", async () => {
+    // PAYOFF amendment: candidate_confirmed was REMOVED from ALWAYS_KEEP and now
+    // ages into cold under the existing pressure window. This is SAFE because
+    // credit.ts / dense_closure_credit.ts read it via the archive-union helpers
+    // (selectEventRowsAcrossTiers / eventExistsAcrossTiers) — so it is MOVED to
+    // the cold sibling (recoverable, still cited cross-tier), never LOST.
     const fiveDaysAgo = new Date(NOW - 5 * 24 * 60 * 60 * 1000).toISOString();
-    const ccIds: string[] = [];
     for (let i = 0; i < 5; i++) {
       const ev = emitEvent(db, { kind: "candidate_confirmed" as Parameters<typeof emitEvent>[1]["kind"], payload: { idx: i } });
       db.run("UPDATE events SET ts = ? WHERE id = ?", [fiveDaysAgo, ev.id]);
-      ccIds.push(ev.id);
     }
     for (let i = 0; i < 3; i++) {
       const ev = emitEvent(db, {
@@ -693,10 +785,8 @@ describe("evaluateLedgerCurationPressure — pressure-triggered retention", () =
       seedEventAtTs(db, new Date(NOW - 5 * 24 * 60 * 60 * 1000 + i * 1000).toISOString(), 500 + i);
     }
 
-    const ccBefore = eventsCount(db, "candidate_confirmed");
-    const ocBefore = eventsCount(db, "origin_calibration_recorded");
-    expect(ccBefore).toBe(5);
-    expect(ocBefore).toBe(3);
+    expect(eventsCount(db, "candidate_confirmed")).toBe(5);
+    expect(eventsCount(db, "origin_calibration_recorded")).toBe(3);
 
     // Maximum pressure → 2-day window → 5-day-old rows are past the cutoff.
     await runArchivalSweep(db, {
@@ -709,9 +799,18 @@ describe("evaluateLedgerCurationPressure — pressure-triggered retention", () =
       minRetentionDays: 2,
     });
 
-    // candidate_confirmed is ALWAYS_KEEP — never archived/deleted by the
-    // pressure-compressed sweep (it is excluded from the candidate scan).
-    expect(eventsCount(db, "candidate_confirmed")).toBe(5);
+    // candidate_confirmed is NO LONGER ALWAYS_KEEP — it moved out of hot into
+    // the cold sibling (the archive-aware credit reads still resolve it there).
+    expect(eventsCount(db, "candidate_confirmed")).toBe(0);
+    // And the moved rows are recoverable from the cold sibling (not lost).
+    const ccArchived = await searchAcrossArchives<{ id: string }>(
+      db,
+      dbPath,
+      "SELECT id FROM events WHERE kind = 'candidate_confirmed'",
+      [],
+      { hotOnlyCold: true },
+    );
+    expect(ccArchived.length).toBe(5);
     // origin_calibration_recorded is excluded from the archival move-to-cold
     // (it is rolled up + evicted on the telemetry path, not the archival
     // path) — the archival sweep must leave every row in place.
