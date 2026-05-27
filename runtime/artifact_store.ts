@@ -36,7 +36,7 @@ import { newId, nowIso } from "./ids";
 import type { EmitEventInput } from "./events";
 import { emitEvent } from "./events";
 import { parseResourceRefs, repoTargetFilesFromResources, resourcesFromTargetFiles, type ResourceRef } from "./resource_uri";
-import { betaMean, betaStreamConfidence } from "./posterior";
+import { betaMean, betaStreamConfidence, residualToBetaDeltas } from "./posterior";
 import { resolveArtifactId } from "../substrate/migration_runner";
 
 export type ActArtifactRow = {
@@ -154,9 +154,6 @@ const QUARANTINE_VIOLATION_THRESHOLD = 5;
 const quarantineResidualThreshold = (): number => QUARANTINE_RESIDUAL_THRESHOLD;
 const quarantineMinObservations = (): number => QUARANTINE_MIN_OBSERVATIONS;
 const quarantineKillCountThreshold = (): number => QUARANTINE_KILL_COUNT_THRESHOLD;
-
-const SUCCESS_BAND = 0.3;
-const FAILURE_BAND = 0.7;
 
 // Canonical Beta math lives in `runtime/posterior.ts`; the local
 // aliases preserve the call-site names so the surrounding diff stays
@@ -464,32 +461,13 @@ const decayedEvidence = (currentEvidence: number, dtMs: number): number => {
   return currentEvidence * decayFactor;
 };
 
-/** Compute the (unweighted) Beta posterior deltas for a single residual
- *  observation, using the standard success/failure bands. Exported so
- *  `runtime/credit.ts` can scale these deltas by a Shapley weight when
- *  distributing per-citation credit without re-implementing the band
- *  algebra. residual is clamped to [0,1] defensively. */
-export const residualToBetaDeltas = (
-  residual: number | null | undefined,
-): { alphaDelta: number; betaDelta: number } => {
-  if (typeof residual !== "number" || !Number.isFinite(residual)) {
-    return { alphaDelta: 0, betaDelta: 0 };
-  }
-  const r = clamp01(residual);
-  let alphaDelta = 0;
-  let betaDelta = 0;
-  if (r <= SUCCESS_BAND) {
-    alphaDelta = 1 - r / SUCCESS_BAND;
-  } else if (r >= FAILURE_BAND) {
-    betaDelta = (r - FAILURE_BAND) / (1 - FAILURE_BAND);
-  } else {
-    // Linear interpolation across the mid-band.
-    const t = (r - SUCCESS_BAND) / (FAILURE_BAND - SUCCESS_BAND);
-    alphaDelta = (1 - t) * 0.5; // taper from 0.5 → 0 across mid-band
-    betaDelta = t * 0.5;        // taper from 0 → 0.5 across mid-band
-  }
-  return { alphaDelta, betaDelta };
-};
+/** Re-export the canonical residual→Beta-delta band map from
+ *  `runtime/posterior.ts` (P6 stage B moved the band algebra there to
+ *  break the posterior↔artifact_store cycle). Kept as a named re-export
+ *  here so existing importers (`runtime/credit.ts`,
+ *  `runtime/recipe_replay.ts`, tests) that pull `residualToBetaDeltas`
+ *  from artifact_store keep resolving without an import-site churn. */
+export { residualToBetaDeltas };
 
 /** Apply a single action_scored outcome to an artifact's posterior + EMA.
  *  Returns the refreshed row. residual is clamped to [0,1] defensively.

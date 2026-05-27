@@ -6,7 +6,11 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 
 import { closeDb, openDb } from "../substrate/db";
-import { residualToBetaDeltas } from "./artifact_store";
+// P6 stage B: residualToBetaDeltas is now CANONICAL in posterior.ts (moved
+// here to break the posterior↔artifact_store cycle). artifact_store re-exports
+// it; the cycle-resolution test below pins that the two bindings are the SAME
+// function reference.
+import { residualToBetaDeltas as residualToBetaDeltasFromArtifactStore } from "./artifact_store";
 import {
   applyScoredOutcome,
   betaConfidence,
@@ -14,13 +18,39 @@ import {
   betaMean,
   betaStreamConfidence,
   getScoredEntity,
+  residualToBetaDeltas,
   scoreFor,
+  SUCCESS_BAND,
+  FAILURE_BAND,
   updateBetaPosterior,
 } from "./posterior";
 
 describe("runtime/posterior — canonical Beta math", () => {
   test("betaMean(1, 1) === 0.5 — symmetric prior", () => {
     expect(betaMean(1, 1)).toBe(0.5);
+  });
+
+  // P6 stage B: cycle resolution. residualToBetaDeltas + the band
+  // constants are canonical in posterior.ts; artifact_store re-exports
+  // residualToBetaDeltas. The re-export MUST be the same function (no
+  // second copy of the band algebra), and the band map must honour the
+  // SUCCESS_BAND / FAILURE_BAND boundaries.
+  test("residualToBetaDeltas is canonical here and the artifact_store export is the SAME reference", () => {
+    expect(residualToBetaDeltasFromArtifactStore).toBe(residualToBetaDeltas);
+  });
+
+  test("residualToBetaDeltas honours SUCCESS_BAND / FAILURE_BAND boundaries", () => {
+    expect(SUCCESS_BAND).toBe(0.3);
+    expect(FAILURE_BAND).toBe(0.7);
+    // Perfect success → full alpha unit, zero beta.
+    expect(residualToBetaDeltas(0)).toEqual({ alphaDelta: 1, betaDelta: 0 });
+    // Total failure → full beta unit, zero alpha.
+    expect(residualToBetaDeltas(1)).toEqual({ alphaDelta: 0, betaDelta: 1 });
+    // At the success band boundary, alpha delta is 0.
+    expect(residualToBetaDeltas(SUCCESS_BAND).alphaDelta).toBeCloseTo(0, 6);
+    // Non-finite residual → no movement.
+    expect(residualToBetaDeltas(null)).toEqual({ alphaDelta: 0, betaDelta: 0 });
+    expect(residualToBetaDeltas(undefined)).toEqual({ alphaDelta: 0, betaDelta: 0 });
   });
 
   test("betaMean(0, 0) === 0 — empty posterior is no signal, not NaN", () => {

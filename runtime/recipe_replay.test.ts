@@ -11,6 +11,7 @@ import { runViews } from "../substrate/views";
 import { emitEvent } from "./events";
 import { newId } from "./ids";
 import { insertArtifact } from "./artifact_store";
+import { getScoredEntity } from "./posterior";
 import {
   findRecipeMatch,
   replayRecipe,
@@ -980,5 +981,65 @@ describe("recipe_replay.updateRecipeConfidence", () => {
       .get() as { payload: string };
     const p = JSON.parse(latest.payload);
     expect(p.confidence).toBeGreaterThanOrEqual(0);
+  });
+
+  // P6 stage B (amendment 5XRDMG6G): the recipe outcome now ALSO flows
+  // through the canonical applyScoredOutcome primitive → a scored_entity
+  // row (entity_kind=recipe), ADDITIVELY. The bespoke sticky confidence
+  // (knowledge_candidate row) is PRESERVED — the matcher still reads it —
+  // because Phase-Align Principle 9 pins the sticky↔Beta divergence and a
+  // full removal is out of this (non-knowledge-spine) stage's scope.
+  const seedRecipe = (db: ReturnType<typeof openDb>): string => {
+    const recipeId = newId();
+    db.run(
+      `INSERT INTO events (id, ts, directive_id, task_id, loop_id, substrate_origin, kind, payload, context_refs)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        recipeId,
+        new Date().toISOString(),
+        "d_recipe",
+        "t_recipe",
+        "loop_root",
+        "substrate_auto",
+        "knowledge_candidate",
+        JSON.stringify({ recipe_shape: { enabled: true }, goal_shape: "x", topology_signature: "y", confidence: 0.5, trajectory: [] }),
+        "[]",
+      ],
+    );
+    return recipeId;
+  };
+
+  test("P6-B: a successful recipe outcome also lands as a scored_entity row (entity_kind=recipe) + entity_score_updated, while the sticky knowledge confidence is preserved", () => {
+    const db = openDb(":memory:");
+    const recipeId = seedRecipe(db);
+    const result = updateRecipeConfidence(db, recipeId, true);
+
+    // Sticky knowledge confidence preserved (matcher source of truth).
+    expect(result.newConfidence).toBeCloseTo(0.55, 5);
+
+    // Canonical scored_entity mirror exists.
+    const se = getScoredEntity(db, recipeId);
+    expect(se).not.toBeNull();
+    expect(se!.entity_kind).toBe("recipe");
+    // success → residual 0 → alpha mass dominates.
+    expect(se!.posterior_alpha).toBeGreaterThan(se!.posterior_beta);
+
+    const ev = db
+      .query<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = 'entity_score_updated' AND json_extract(payload, '$.entity_id') = ?",
+      )
+      .get(recipeId);
+    expect(ev!.n).toBe(1);
+  });
+
+  test("P6-B: a failed recipe outcome moves the scored_entity beta mass", () => {
+    const db = openDb(":memory:");
+    const recipeId = seedRecipe(db);
+    updateRecipeConfidence(db, recipeId, false);
+    const se = getScoredEntity(db, recipeId);
+    expect(se).not.toBeNull();
+    expect(se!.entity_kind).toBe("recipe");
+    // failure → residual 1 → beta mass dominates.
+    expect(se!.posterior_beta).toBeGreaterThan(se!.posterior_alpha);
   });
 });

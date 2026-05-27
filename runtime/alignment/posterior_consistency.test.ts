@@ -24,11 +24,20 @@ describe("alignment / posterior_consistency (Principle 9)", () => {
       join(import.meta.dir, "..", "..", "substrate", "extractors.ts"),
       "utf-8",
     );
+    // P6 consolidation (amendment 5XRDMG6G stage B): the success/failure bands
+    // are now canonically defined ONCE in runtime/posterior.ts and re-exported
+    // from artifact_store.ts. Assert them at the canonical home.
+    const posterior = readFileSync(
+      join(import.meta.dir, "..", "posterior.ts"),
+      "utf-8",
+    );
 
-    // Artifact store: residual ≤ 0.3 → success, ≥ 0.7 → failure.
-    expect(artifactStore).toContain("const SUCCESS_BAND = 0.3");
-    expect(artifactStore).toContain("const FAILURE_BAND = 0.7");
-    // EMA half-life is 20 events.
+    // Canonical bands (posterior.ts): residual ≤ 0.3 → success, ≥ 0.7 → failure.
+    expect(posterior).toContain("const SUCCESS_BAND = 0.3");
+    expect(posterior).toContain("const FAILURE_BAND = 0.7");
+    // artifact_store re-exports the canonical band math so existing importers resolve.
+    expect(artifactStore).toContain("residualToBetaDeltas");
+    // EMA half-life is 20 events (still owned by artifact_store).
     expect(artifactStore).toContain("EMA_HALF_LIFE_EVENTS = 20");
 
     // Extractors: identical 0.3 success threshold for knowledge corroboration.

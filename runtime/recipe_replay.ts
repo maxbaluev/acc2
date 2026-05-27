@@ -36,6 +36,7 @@ import type { JsonValue } from "../substrate/types";
 import { emitEvent } from "./events";
 import { goalShape } from "./goal_shape";
 import { getArtifact, applyResidualOutcome } from "./artifact_store";
+import { applyScoredOutcome } from "./posterior";
 import { runArtifactForRuntime } from "./runtimes/index";
 import type { TaskNode } from "./task_topology";
 import { distributeCredit } from "./credit";
@@ -856,6 +857,36 @@ export const updateRecipeConfidence = (
         derived_from_knowledge_id: recipeId,
       },
     } as JsonValue,
+    context_refs: [recipeId],
+  });
+
+  // P6 stage B (amendment 5XRDMG6G): additively route the recipe outcome
+  // through the canonical `applyScoredOutcome` primitive so each recipe
+  // also lands as ONE `scored_entity` row (entity_kind="recipe"), audited
+  // by ONE `entity_score_updated` event — the consolidation target.
+  //
+  // This is ADDITIVE, NOT a replacement. The bespoke sticky
+  // (+0.05/−0.10) confidence-of-record above is DELIBERATELY a different
+  // shape than the Beta posterior (see the module header + Phase-Align
+  // Principle 9, which PINS the divergence and forbids silent unification)
+  // AND it is the row the recipe matcher (fetchMatchedRecipe /
+  // recipesLatestView) reads to gate replay. Removing it would (a) change
+  // recipe gating semantics from sticky→Beta and (b) require restructuring
+  // the knowledge_candidate read path the matcher and the
+  // extractRecipeCandidates seed share — that read path is the knowledge
+  // spine, out of this stage's scope. So we mirror the outcome into the
+  // scored_entity substrate WITHOUT removing the sticky drift. A later
+  // (in-scope-for-knowledge-spine) stage may move the matcher onto
+  // scored_entity and retire the sticky row; this stage only establishes
+  // the parallel canonical row. Map success→residual 0, failure→1 (the
+  // coarse single-bit recipe outcome the sticky model already uses).
+  applyScoredOutcome(db, {
+    entity_id: recipeId,
+    entity_kind: "recipe",
+    outcome: success ? "succeeded" : "failed",
+    ts: nowIso(),
+    directive_id: seed.directive_id,
+    task_id: seed.task_id,
     context_refs: [recipeId],
   });
 

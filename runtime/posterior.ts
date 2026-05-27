@@ -102,6 +102,59 @@ export const scoreFor = (
   confidence: betaConfidence(alpha, beta),
 });
 
+const clamp01 = (x: number): number => Math.max(0, Math.min(1, x));
+
+// ── Residual → Beta-delta band mapping (canonical home, P6 stage B) ──
+//
+// The success/failure band algebra used to live in `artifact_store.ts`
+// and was lazily-required back into this module (the stage-A hack noted
+// below). P6 stage B makes posterior.ts the CANONICAL home of the band
+// constants + the residual→delta map; artifact_store imports
+// `residualToBetaDeltas` statically from here, so there is no longer a
+// module-load cycle (posterior.ts has no static import OF artifact_store).
+//
+//   - residual ≤ SUCCESS_BAND (0.3) counts as a "success": αΔ grows from
+//     1 (residual 0) → 0 (band boundary).
+//   - residual ≥ FAILURE_BAND (0.7) counts as a "failure": βΔ grows from
+//     0 (band boundary) → 1 (residual 1).
+//   - Mid-band 0.3 < r < 0.7 tapers both αΔ and βΔ across 0.5 so the
+//     posterior tracks informativeness without forcing a discrete
+//     win/loss.
+
+/** Success band: residual at/below this counts (proportionally) as a win. */
+export const SUCCESS_BAND = 0.3;
+/** Failure band: residual at/above this counts (proportionally) as a loss. */
+export const FAILURE_BAND = 0.7;
+
+/** Compute the (unweighted) Beta posterior deltas for a single residual
+ *  observation, using the standard success/failure bands. Exported so
+ *  `runtime/artifact_store.ts` (per-artifact health), `runtime/credit.ts`
+ *  (Shapley-weighted per-citation credit) and the consolidated
+ *  `applyScoredOutcome` primitive all share ONE copy of the band algebra.
+ *  residual is clamped to [0,1] defensively; a non-finite residual yields
+ *  zero deltas (no posterior movement). */
+export const residualToBetaDeltas = (
+  residual: number | null | undefined,
+): { alphaDelta: number; betaDelta: number } => {
+  if (typeof residual !== "number" || !Number.isFinite(residual)) {
+    return { alphaDelta: 0, betaDelta: 0 };
+  }
+  const r = clamp01(residual);
+  let alphaDelta = 0;
+  let betaDelta = 0;
+  if (r <= SUCCESS_BAND) {
+    alphaDelta = 1 - r / SUCCESS_BAND;
+  } else if (r >= FAILURE_BAND) {
+    betaDelta = (r - FAILURE_BAND) / (1 - FAILURE_BAND);
+  } else {
+    // Linear interpolation across the mid-band.
+    const t = (r - SUCCESS_BAND) / (FAILURE_BAND - SUCCESS_BAND);
+    alphaDelta = (1 - t) * 0.5; // taper from 0.5 → 0 across mid-band
+    betaDelta = t * 0.5;        // taper from 0 → 0.5 across mid-band
+  }
+  return { alphaDelta, betaDelta };
+};
+
 // ── Canonical scored-entity primitive (P6 consolidation, stage A) ────
 //
 // Brain amendment 5XRDMG6G, stage A — ADDITIVE ONLY. The substrate has
@@ -123,11 +176,10 @@ export const scoreFor = (
 //
 // It REUSES the existing posterior math verbatim rather than inventing
 // new algebra:
-//   * residual → (αΔ, βΔ): `artifact_store.residualToBetaDeltas` — the
-//     SUCCESS_BAND=0.3 / FAILURE_BAND=0.7 band logic already used by
-//     `applyResidualOutcome`. Imported lazily to avoid the posterior↔
-//     artifact_store import cycle (artifact_store imports betaMean /
-//     betaStreamConfidence from this module).
+//   * residual → (αΔ, βΔ): `residualToBetaDeltas` — the SUCCESS_BAND=0.3 /
+//     FAILURE_BAND=0.7 band logic, now CANONICAL in this module (P6 stage
+//     B moved it here; artifact_store imports it statically, so the
+//     stage-A lazy-require cycle hack is gone).
 //   * score = `betaMean(α, β)` — identical to artifact_store's
 //     `recomputeScore`.
 //   * confidence = `betaStreamConfidence(α, β)` — identical to
@@ -146,27 +198,12 @@ import type { JsonValue } from "../substrate/types";
  *  only the accumulated evidence (α−1, β−1) ages. */
 export const SCORED_ENTITY_POSTERIOR_HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1000;
 
-const clamp01 = (x: number): number => Math.max(0, Math.min(1, x));
-
 /** Exponentially decay accumulated evidence over elapsed wall time —
  *  the same shape `artifact_store.decayedEvidence` uses. */
 const decayedEvidence = (currentEvidence: number, dtMs: number): number => {
   const halfLife = SCORED_ENTITY_POSTERIOR_HALF_LIFE_MS;
   if (halfLife <= 0 || dtMs <= 0) return currentEvidence;
   return currentEvidence * Math.pow(0.5, dtMs / halfLife);
-};
-
-/** Lazily borrow the canonical residual→Beta-delta band mapping from
- *  artifact_store so the scored-entity primitive uses the EXACT success/
- *  failure band algebra (SUCCESS_BAND=0.3, FAILURE_BAND=0.7) that
- *  applyResidualOutcome uses — no second copy of the band thresholds.
- *  Lazy require keeps the module-load edge acyclic (artifact_store imports
- *  betaMean / betaStreamConfidence from this file at load time). */
-const residualToBetaDeltas = (
-  residual: number | null | undefined,
-): { alphaDelta: number; betaDelta: number } => {
-  const store = require("./artifact_store") as typeof import("./artifact_store");
-  return store.residualToBetaDeltas(residual);
 };
 
 /** A single scored learnable entity. The consolidation target: every
