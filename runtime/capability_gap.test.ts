@@ -367,18 +367,36 @@ describe("proactive capability_gap (gap-at-selection)", () => {
   test("cooldown stops repeated proactive authoring after resolution", () => {
     const db = openDb(":memory:");
     const args = { goal_shape: "shape_cool", best_fit: 0.1, candidate_count: 1, wants_artifact: true };
-    // nowMs anchored at/after the real event ts the seam writes, so the
-    // cooldown arithmetic (nowMs - Date.parse(ts)) is meaningful.
-    const base = Date.now();
-    expect(maybeOpenProactiveGap(db, args, { nowMs: base }).opened).toBe(true);
+    expect(maybeOpenProactiveGap(db, args).opened).toBe(true);
     // Resolve (an artifact got admitted) → gap no longer "open" but cooldown applies.
     resolveProactiveGap(db, "shape_cool", "art_built");
+    // Anchor the cooldown arithmetic on the ACTUAL detection ts the seam wrote.
+    // proactiveGapSuppressed compares the caller's nowMs against the stored
+    // event ts (`nowMs - Date.parse(ts)`), and emitEvent stamps that ts from
+    // the real wall clock — NOT from any nowMs passed to maybeOpenProactiveGap.
+    // Anchoring the +/-1ms boundary offsets on a separately-captured Date.now()
+    // left only a sub-millisecond margin against the execution delay between
+    // that capture and the emit; under parallel-suite contention that delay
+    // exceeded 1ms, so the "after" boundary fell back inside the cooldown window
+    // — flaking the full-suite run while passing in isolation. Reading the
+    // persisted ts back makes the boundary math independent of that delay.
+    const detectMs = Date.parse(
+      (db
+        .query(
+          `SELECT ts FROM events
+             WHERE kind = 'capability_gap_detected'
+               AND json_extract(payload, '$.goal_shape') = 'shape_cool'
+               AND json_extract(payload, '$.reason') = 'proactive_no_fit'
+             ORDER BY ts DESC LIMIT 1`,
+        )
+        .get() as { ts: string }).ts,
+    );
     // Within the cooldown window after the detection → suppressed by cooldown.
-    const within = maybeOpenProactiveGap(db, args, { nowMs: base + CAPGAP_PROACTIVE_COOLDOWN_MS_FOR_TEST - 1 });
+    const within = maybeOpenProactiveGap(db, args, { nowMs: detectMs + CAPGAP_PROACTIVE_COOLDOWN_MS_FOR_TEST - 1 });
     expect(within.opened).toBe(false);
     expect(within.skip_reason).toBe("suppressed_cooldown");
     // After the cooldown elapses (and still poor fit) → re-opens.
-    const after = maybeOpenProactiveGap(db, args, { nowMs: base + CAPGAP_PROACTIVE_COOLDOWN_MS_FOR_TEST + 1 });
+    const after = maybeOpenProactiveGap(db, args, { nowMs: detectMs + CAPGAP_PROACTIVE_COOLDOWN_MS_FOR_TEST + 1 });
     expect(after.opened).toBe(true);
   });
 
