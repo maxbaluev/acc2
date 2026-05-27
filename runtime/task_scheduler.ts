@@ -379,7 +379,13 @@ const clearInFlightTask = (taskId: string, db?: Database): void => {
   if (db) releaseDispatchLease(db, taskId);
   GATE_NOTIFIED.delete(gateKey(taskId, "brain_concurrency_cap"));
   GATE_NOTIFIED.delete(gateKey(taskId, "bridge_health_degraded"));
-  if (IN_FLIGHT_BRAIN.size === 0) GATE_NOTIFIED.clear();
+  // Re-bloat fix: do NOT blanket-clear GATE_NOTIFIED when IN_FLIGHT_BRAIN empties.
+  // When quiesced IN_FLIGHT_BRAIN is always empty, so this wiped the whole dedup
+  // set on every settle → every still-queued candidate re-emitted
+  // constitutional_gate_decision next 500ms tick (observed 813/min, 38K rows).
+  // The per-key deletes above invalidate THIS task's dedup on its own
+  // state-change; genuine cycle boundaries are cleared at line ~725
+  // (reconcileBrainInFlightSlots) and in _resetSchedulerForTests.
 };
 
 /** Max consecutive `bridge_failed` events for a single task before the
