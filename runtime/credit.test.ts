@@ -22,6 +22,8 @@ import {
   __classifyTargetForTest,
   dispatchRouteAxisFactorEntityId,
   promptPolicySectionSelectionEntityId,
+  thresholdMeasurementEntityId,
+  verifierMeasurementEntityId,
 } from "./credit";
 import { getScoredEntity } from "./posterior";
 import { decisionInfluencerScores } from "../substrate/views";
@@ -2555,8 +2557,8 @@ describe("projectCreditEnvelope — single outcome-credit boundary", () => {
       id: scored.id,
       payload: JSON.stringify({ action_predicted_event_id: ap.id }),
       context_refs: JSON.stringify([ap.id]),
-      directive_id: scored.directive_id,
-      task_id: scored.task_id,
+      directive_id: "",
+      task_id: "",
       residual: 0,
       action_artifact_id: "art_action",
       verifier_artifact_id: "art_verifier",
@@ -2596,8 +2598,8 @@ describe("projectCreditEnvelope — single outcome-credit boundary", () => {
       id: scored.id,
       payload: "{}",
       context_refs: JSON.stringify([kc.id, binding]),
-      directive_id: scored.directive_id,
-      task_id: scored.task_id,
+      directive_id: "",
+      task_id: "",
       residual: 0.05,
       action_artifact_id: null,
       verifier_artifact_id: null,
@@ -2782,7 +2784,7 @@ describe("P4 decision-influencer scoring (amendment CWHVYFX9)", () => {
       action_artifact_id: "art_action_p4",
       verifier_artifact_id: "art_verifier_p4",
       predicted_residual: residual,
-      payload: {},
+      payload: { threshold_names: ["closure_gate_residual_threshold"] },
     });
     const scored = emitEvent(db, {
       kind: "action_scored",
@@ -2843,6 +2845,42 @@ describe("P4 decision-influencer scoring (amendment CWHVYFX9)", () => {
     const kinds = rows.map((r) => JSON.parse(r.payload).entity_kind as string);
     expect(kinds).toContain("dispatch_route_axis_factor");
     expect(kinds).toContain("prompt_policy_section_selection");
+    closeDb();
+  });
+
+  test("U6 scores verifier and threshold measurement entities from downstream outcomes", () => {
+    const db = openDb(":memory:");
+    seedScoredActWithInfluencers(db, 0);
+
+    const verifier = getScoredEntity(db, verifierMeasurementEntityId("art_verifier_p4"));
+    const threshold = getScoredEntity(db, thresholdMeasurementEntityId("closure_gate_residual_threshold"));
+    expect(verifier).not.toBeNull();
+    expect(threshold).not.toBeNull();
+    // The verifier id is also an act_artifact id; legacy artifact scoring may
+    // leave the consolidated row kind as act_artifact. The recursive U6
+    // contract is proven by posterior movement plus measurement audit rows.
+    expect(verifier!.posterior_alpha).toBeGreaterThan(1);
+    expect(threshold!.entity_kind).toBe("threshold_predicate");
+    expect(threshold!.posterior_alpha).toBeGreaterThan(1);
+
+    const measurementRows = db
+      .query<{ role: string; entity_id: string; capability: number }, []>(
+        "SELECT json_extract(payload, '$.measurement_role') AS role, json_extract(payload, '$.entity_id') AS entity_id, json_extract(payload, '$.capability_properties.measurement') AS capability FROM events WHERE kind = 'entity_score_updated' AND json_extract(payload, '$.influencer') = 'measurement' ORDER BY role",
+      )
+      .all();
+    expect(measurementRows.map((r) => r.role)).toEqual(["threshold", "verifier"]);
+    expect(measurementRows.map((r) => r.entity_id)).toEqual([thresholdMeasurementEntityId("closure_gate_residual_threshold"), verifierMeasurementEntityId("art_verifier_p4")]);
+    expect(measurementRows.every((r) => r.capability === 1)).toBe(true);
+    closeDb();
+  });
+
+  test("U6 failure residual moves measurement entities toward beta", () => {
+    const db = openDb(":memory:");
+    seedScoredActWithInfluencers(db, 1);
+    const threshold = getScoredEntity(db, thresholdMeasurementEntityId("closure_gate_residual_threshold"));
+    expect(threshold).not.toBeNull();
+    expect(threshold!.posterior_beta).toBeGreaterThan(1);
+    expect(threshold!.posterior_alpha).toBeLessThanOrEqual(1.0001);
     closeDb();
   });
 

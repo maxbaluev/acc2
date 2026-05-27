@@ -1553,6 +1553,21 @@ export const dispatchRouteAxisFactorEntityId = (axisKey: string): string =>
 export const promptPolicySectionSelectionEntityId = (sectionName: string, goalShapeToken: string): string =>
   "prompt_policy_section_selection:" + sectionName + ":" + (goalShapeToken || "global");
 
+/** Stable scored_entity id for a verifier as a measurement influencer. The
+ *  verifier handle is already the stable universal id used by action_scored;
+ *  entity_kind differentiates its measurement role from act_artifact rows. */
+export const measurementVerifierEntityId = (verifierArtifactId: string): string =>
+  "measurement_verifier:" + verifierArtifactId;
+
+export const measurementEntityId = (role: string, id: string): string =>
+  "measurement_" + role + ":" + id;
+
+export const verifierMeasurementEntityId = measurementVerifierEntityId;
+
+/** Stable scored_entity id for a threshold as a measurement influencer. */
+export const thresholdMeasurementEntityId = (thresholdNameOrId: string): string =>
+  measurementEntityId("threshold", thresholdNameOrId);
+
 /** Read the most-recent dispatch_decided routing_axes for a task lineage so
  *  the influencer scorer credits the axes that actually shaped this act's
  *  route. Returns the latest non-empty routing_axes map (axis_key → value)
@@ -1673,6 +1688,189 @@ const scoreDecisionInfluencers = (
 };
 
 export const __scoreDecisionInfluencersForTest = scoreDecisionInfluencers;
+
+const addString = (out: Set<string>, value: unknown, map: (s: string) => string = (s) => s): void => {
+  if (typeof value === "string" && value.length > 0) out.add(map(value));
+};
+
+const addStrings = (out: Set<string>, value: unknown, map: (s: string) => string = (s) => s): void => {
+  if (!Array.isArray(value)) return;
+  for (const item of value) addString(out, item, map);
+};
+
+const collectMeasurementPayloads = (payloads: ReadonlyArray<Record<string, unknown>>): Record<string, unknown>[] => {
+  const out: Record<string, unknown>[] = [];
+  for (const payload of payloads) {
+    out.push(payload);
+    const nested = jsonObject(payload.measurement_influencers as JsonValue | undefined);
+    if (Object.keys(nested).length > 0) out.push(nested);
+  }
+  return out;
+};
+
+const collectVerifierMeasurementIds = (
+  verifierArtifactId: string | null | undefined,
+  payloads: ReadonlyArray<Record<string, unknown>>,
+): string[] => {
+  const out = new Set<string>();
+  addString(out, verifierArtifactId, measurementVerifierEntityId);
+  for (const payload of collectMeasurementPayloads(payloads)) {
+    addString(out, payload.verifier_entity_id, measurementVerifierEntityId);
+    addString(out, payload.verifier_artifact_id, measurementVerifierEntityId);
+    addStrings(out, payload.verifier_entity_ids, measurementVerifierEntityId);
+    addStrings(out, payload.verifier_artifact_ids, measurementVerifierEntityId);
+  }
+  return [...out];
+};
+
+const collectThresholdMeasurementIds = (payloads: ReadonlyArray<Record<string, unknown>>): string[] => {
+  const out = new Set<string>();
+  for (const payload of collectMeasurementPayloads(payloads)) {
+    addString(out, payload.threshold_entity_id, thresholdMeasurementEntityId);
+    addString(out, payload.threshold_artifact_id, thresholdMeasurementEntityId);
+    addString(out, payload.threshold_id, thresholdMeasurementEntityId);
+    addStrings(out, payload.threshold_entity_ids, thresholdMeasurementEntityId);
+    addStrings(out, payload.threshold_artifact_ids, thresholdMeasurementEntityId);
+    addStrings(out, payload.threshold_ids, thresholdMeasurementEntityId);
+    addString(out, payload.threshold_name, thresholdMeasurementEntityId);
+    addStrings(out, payload.threshold_names, thresholdMeasurementEntityId);
+  }
+  return [...out];
+};
+
+type MeasurementInfluencer = {
+  entity_id: string;
+  entity_kind: string;
+  role: string;
+  source_id: string;
+};
+
+const addMeasurementInfluencer = (
+  out: Map<string, MeasurementInfluencer>,
+  role: string,
+  entityKind: string,
+  rawId: unknown,
+  sourceId: string,
+  mapId: (s: string) => string = (s) => s,
+): void => {
+  if (typeof rawId !== "string" || rawId.length === 0) return;
+  const entityId = mapId(rawId);
+  if (!out.has(role + ":" + entityId)) out.set(role + ":" + entityId, { entity_id: entityId, entity_kind: entityKind, role, source_id: sourceId });
+};
+
+const addMeasurementInfluencerList = (
+  out: Map<string, MeasurementInfluencer>,
+  role: string,
+  entityKind: string,
+  rawIds: unknown,
+  sourceId: string,
+  mapId: (s: string) => string = (s) => s,
+): void => {
+  if (!Array.isArray(rawIds)) return;
+  for (const rawId of rawIds) addMeasurementInfluencer(out, role, entityKind, rawId, sourceId, mapId);
+};
+
+const collectMeasurementInfluencers = (
+  scoredEvent: { verifier_artifact_id?: string | null },
+  payloads: ReadonlyArray<Record<string, unknown>>,
+): MeasurementInfluencer[] => {
+  const out = new Map<string, MeasurementInfluencer>();
+  addMeasurementInfluencer(out, "verifier", "verifier", scoredEvent.verifier_artifact_id, "verifier_artifact_id", verifierMeasurementEntityId);
+  for (const payload of collectMeasurementPayloads(payloads)) {
+    addMeasurementInfluencer(out, "verifier", "verifier", payload.verifier_entity_id, "verifier_entity_id", verifierMeasurementEntityId);
+    addMeasurementInfluencer(out, "verifier", "verifier", payload.verifier_artifact_id, "verifier_artifact_id", verifierMeasurementEntityId);
+    addMeasurementInfluencerList(out, "verifier", "verifier", payload.verifier_entity_ids, "verifier_entity_ids", verifierMeasurementEntityId);
+    addMeasurementInfluencerList(out, "verifier", "verifier", payload.verifier_artifact_ids, "verifier_artifact_ids", verifierMeasurementEntityId);
+    addMeasurementInfluencer(out, "threshold", "threshold_predicate", payload.threshold_entity_id, "threshold_entity_id");
+    addMeasurementInfluencer(out, "threshold", "threshold_predicate", payload.threshold_artifact_id, "threshold_artifact_id");
+    addMeasurementInfluencer(out, "threshold", "threshold_predicate", payload.threshold_id, "threshold_id");
+    addMeasurementInfluencer(out, "threshold", "threshold_predicate", payload.threshold_name, "threshold_name", thresholdMeasurementEntityId);
+    addMeasurementInfluencerList(out, "threshold", "threshold_predicate", payload.threshold_entity_ids, "threshold_entity_ids");
+    addMeasurementInfluencerList(out, "threshold", "threshold_predicate", payload.threshold_artifact_ids, "threshold_artifact_ids");
+    addMeasurementInfluencerList(out, "threshold", "threshold_predicate", payload.threshold_ids, "threshold_ids");
+    addMeasurementInfluencerList(out, "threshold", "threshold_predicate", payload.threshold_names, "threshold_names", thresholdMeasurementEntityId);
+    addMeasurementInfluencer(out, "metric", "metric", payload.metric_entity_id, "metric_entity_id");
+    addMeasurementInfluencer(out, "metric", "metric", payload.metric_id, "metric_id");
+    addMeasurementInfluencer(out, "metric", "metric", payload.metric_name, "metric_name", (s) => "metric_" + s);
+    addMeasurementInfluencerList(out, "metric", "metric", payload.metric_entity_ids, "metric_entity_ids");
+    addMeasurementInfluencerList(out, "metric", "metric", payload.metric_ids, "metric_ids");
+    addMeasurementInfluencerList(out, "metric", "metric", payload.metric_names, "metric_names", (s) => "metric_" + s);
+    addMeasurementInfluencer(out, "policy", "policy", payload.policy_entity_id, "policy_entity_id");
+    addMeasurementInfluencer(out, "policy", "policy", payload.policy_id, "policy_id");
+    addMeasurementInfluencerList(out, "policy", "policy", payload.policy_entity_ids, "policy_entity_ids");
+    addMeasurementInfluencerList(out, "policy", "policy", payload.policy_ids, "policy_ids");
+    addMeasurementInfluencer(out, "scoring_workflow", "scoring_workflow", payload.scoring_workflow_entity_id, "scoring_workflow_entity_id");
+    addMeasurementInfluencer(out, "scoring_workflow", "scoring_workflow", payload.scoring_workflow_id, "scoring_workflow_id");
+    addMeasurementInfluencerList(out, "scoring_workflow", "scoring_workflow", payload.scoring_workflow_entity_ids, "scoring_workflow_entity_ids");
+    addMeasurementInfluencerList(out, "scoring_workflow", "scoring_workflow", payload.scoring_workflow_ids, "scoring_workflow_ids");
+  }
+  return [...out.values()];
+};
+
+/** U6 recursive self-scoring: score the measurement machinery that shaped a
+ *  downstream decision/outcome. Verifiers and thresholds are ordinary
+ *  scored_entity rows with measurement capability metadata, updated by the
+ *  same applyScoredOutcome primitive as every other universal entity. */
+const scoreMeasurementInfluencers = (
+  db: Database,
+  params: {
+    scored_event_id: string;
+    task_id: string | null;
+    directive_id: string | null;
+    residual: number;
+    ts: string;
+    verifier_artifact_id?: string | null;
+    scored_payload: Record<string, unknown>;
+    predicted_payload: Record<string, unknown>;
+  },
+): void => {
+  const payloads = [params.scored_payload, params.predicted_payload];
+  const residual = clampResidual(params.residual);
+  try {
+    for (const entityId of collectVerifierMeasurementIds(params.verifier_artifact_id, payloads)) {
+      applyScoredOutcome(db, {
+        entity_id: entityId,
+        entity_kind: "verifier",
+        residual,
+        ts: params.ts,
+        projection_key: "measurement_influencer:verifier:" + entityId + ":" + params.scored_event_id,
+        directive_id: params.directive_id ?? undefined,
+        task_id: params.task_id ?? undefined,
+        context_refs: [params.scored_event_id, entityId],
+        payload: {
+          influencer: "measurement",
+          measurement_role: "verifier",
+          capability_properties: { measurement: 1, measurement_role: "verifier" },
+          scored_event_id: params.scored_event_id,
+          projection_source: "scoreMeasurementInfluencers",
+          projected_from: "recursive_measurement_scoring",
+        },
+      });
+    }
+    for (const entityId of collectThresholdMeasurementIds(payloads)) {
+      applyScoredOutcome(db, {
+        entity_id: entityId,
+        entity_kind: "threshold_predicate",
+        residual,
+        ts: params.ts,
+        projection_key: "measurement_influencer:threshold:" + entityId + ":" + params.scored_event_id,
+        directive_id: params.directive_id ?? undefined,
+        task_id: params.task_id ?? undefined,
+        context_refs: [params.scored_event_id, entityId],
+        payload: {
+          influencer: "measurement",
+          measurement_role: "threshold",
+          capability_properties: { measurement: 1, measurement_role: "threshold" },
+          scored_event_id: params.scored_event_id,
+          projection_source: "scoreMeasurementInfluencers",
+          projected_from: "recursive_measurement_scoring",
+        },
+      });
+    }
+  } catch { /* fail-soft: recursive measurement scoring must not poison credit */ }
+};
+
+export const __scoreMeasurementInfluencersForTest = scoreMeasurementInfluencers;
 
 // ── T0.2 Universal action_scored → act_artifact_score_updated projection ─
 //
@@ -2190,6 +2388,16 @@ export const projectActionScoredToCredit = (
         residual,
         ts,
         goal_shape: universalGoalShape,
+      });
+      scoreMeasurementInfluencers(db, {
+        scored_event_id: scoredEvent.id,
+        task_id: scoredEvent.task_id,
+        directive_id: scoredEvent.directive_id,
+        residual,
+        ts,
+        verifier_artifact_id: scoredEvent.verifier_artifact_id,
+        scored_payload: payload,
+        predicted_payload: predictedPayload,
       });
     }
   } catch (err) {

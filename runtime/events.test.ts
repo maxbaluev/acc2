@@ -17,6 +17,8 @@ import type { Database } from "bun:sqlite";
 import type { EventKind } from "../substrate/types";
 import { getArtifact, insertArtifact } from "./artifact_store";
 import { emitEvent, getEventById, getEventRowById, flushPostCommitProjectionsForTest, postCommitProjectionDepth, resetPostCommitProjectionsForTest } from "./events";
+import { getScoredEntity } from "./posterior";
+import { measurementEntityId, measurementVerifierEntityId } from "./credit";
 import { runArchivalSweep } from "./archival_worker";
 import { newId } from "./ids";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -418,6 +420,7 @@ describe("emitEvent act_tuple_recorded projector", () => {
       "candidate_confirmed",
       "coalition_credit_distributed",
       "credit_envelope_projected",
+      "entity_score_updated",
       "entity_score_updated",
       "entity_score_updated",
       "entity_score_updated",
@@ -999,7 +1002,7 @@ describe("emitEvent act_tuple_recorded projector", () => {
       candidate_confirmed: 6,
       coalition_credit_distributed: 1,
       credit_envelope_projected: 1,
-      entity_score_updated: 12,
+      entity_score_updated: 13,
       origin_calibration_recorded: 10,
       retrieval_binding: 4,
       retrieval_rejected: 1,
@@ -1052,6 +1055,63 @@ describe("emitEvent act_tuple_recorded projector", () => {
     expect(confirmed).not.toBeNull();
     const payload = JSON.parse(confirmed!.payload) as Record<string, unknown>;
     expect(payload.source_act_id).toBe(act.id);
+  });
+
+  test("emitEvent(action_scored) recursively scores verifier and threshold measurement entities", async () => {
+    const db = openDb(":memory:");
+    const directiveId = newId();
+    const taskId = newId();
+    const actionId = "u6_action";
+    const verifierId = "u6_verifier";
+    const thresholdId = "closure_gate_residual_threshold";
+    insertSampleArtifact(db, actionId);
+    insertSampleArtifact(db, verifierId);
+
+    const predicted = emitEvent(db, {
+      kind: "action_predicted",
+      substrate_origin: "opencode",
+      directive_id: directiveId,
+      task_id: taskId,
+      action_artifact_id: actionId,
+      verifier_artifact_id: verifierId,
+      predicted_residual: 0.1,
+      payload: { threshold_entity_ids: [thresholdId] },
+    });
+
+    const scored = emitEvent(db, {
+      kind: "action_scored",
+      substrate_origin: "substrate_auto",
+      directive_id: directiveId,
+      task_id: taskId,
+      action_artifact_id: actionId,
+      verifier_artifact_id: verifierId,
+      residual: 0,
+      payload: {
+        action_predicted_event_id: predicted.id,
+        residual: 0,
+        threshold_entity_ids: [thresholdId],
+      },
+    });
+
+    await flushPostCommitProjectionsForTest();
+
+    const verifierEntity = getScoredEntity(db, measurementVerifierEntityId(verifierId));
+    const thresholdEntity = getScoredEntity(db, measurementEntityId("threshold", thresholdId));
+    expect(verifierEntity).not.toBeNull();
+    expect(thresholdEntity).not.toBeNull();
+    expect(verifierEntity!.posterior_alpha).toBeGreaterThan(1);
+    expect(thresholdEntity!.posterior_alpha).toBeGreaterThan(1);
+
+    const scoreRows = db.query<{ entity_id: string; role: string; projected_from: string }, [string, string]>(
+      "SELECT json_extract(payload, '$.entity_id') AS entity_id, " +
+      "json_extract(payload, '$.measurement_role') AS role, " +
+      "json_extract(payload, '$.projected_from') AS projected_from " +
+      "FROM events WHERE kind = 'entity_score_updated' " +
+      "AND json_extract(payload, '$.scored_event_id') = ? " +
+      "AND json_extract(payload, '$.projected_from') = ? ORDER BY role ASC",
+    ).all(scored.id, "recursive_measurement_scoring");
+    expect(scoreRows.map((row) => row.role).sort()).toEqual(["threshold", "verifier"]);
+    expect(scoreRows.every((row) => row.projected_from === "recursive_measurement_scoring")).toBe(true);
   });
 
   test("emitEvent(action_scored) projects meta-credit for production fallback policy selections", async () => {
