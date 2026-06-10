@@ -1,3 +1,10 @@
+> ⚠️ **Outdated early experiment — not the current architecture.**
+> This is an old prototype, kept for history. The current work is **acc4** — a
+> Recursive Language Model over a late-interaction scored-token memory:
+> **[github.com/maxbaluev/accreted-intelligence](https://github.com/maxbaluev/accreted-intelligence)**
+
+---
+
 # AccInt v2
 
 A universal **Recursive Language Model** whose recursive memory, synthesis operator, and code-runtime broker all live in a persistent substrate daemon. The owner speaks naturally; Claude Code (you) routes; opencode (gpt-5.5) reasons; the substrate compounds.
